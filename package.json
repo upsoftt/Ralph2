@@ -1,0 +1,17 @@
+{
+  "name": "ralph2",
+  "version": "1.0.0",
+  "description": "",
+  "main": "tty_wrapper.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "strip-ansi": "^7.2.0"
+  }
+}

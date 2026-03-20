@@ -1,0 +1,12 @@
+node_modules/
+__pycache__/
+*.pyc
+.ralph-runner/
+web_server.log
+web_server.old
+busy_state.json
+launch_state.json
+tracker_state.json
+projects.json
+*.exe
+package-lock.json
