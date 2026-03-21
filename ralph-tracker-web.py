@@ -14,7 +14,14 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import ctypes
 import shutil
+import webbrowser
 _claude_exe = os.environ.get('CLAUDE_EXE') or shutil.which('claude') or r"C:\Users\upsof\.local\bin\claude.exe"
+
+try:
+    from trayconsole_client import TrayConsoleClient
+    _trayconsole_available = True
+except ImportError:
+    _trayconsole_available = False
 
 def _is_process_alive(pid):
     """Windows-safe проверка: жив ли процесс по PID (без os.kill, который убивает на Windows)."""
@@ -339,7 +346,10 @@ def _execute_launch(project_id, p_path, launch_config):
                     cwd=str(p_path),
                     creationflags=subprocess.CREATE_NEW_CONSOLE
                 )
-                LAUNCHED_PROCESSES[project_id] = proc
+                # Храним список процессов (может быть фронт+бэк)
+                if project_id not in LAUNCHED_PROCESSES or not isinstance(LAUNCHED_PROCESSES[project_id], list):
+                    LAUNCHED_PROCESSES[project_id] = []
+                LAUNCHED_PROCESSES[project_id].append(proc)
                 _save_launch_state()
 
     _threading.Thread(target=run_steps, daemon=True).start()
@@ -419,7 +429,13 @@ def update_status():
         all_done = total > 0 and done == total
         p_path_obj = Path(proj["path"])
         launch_config = _load_launch_config(p_path_obj)
-        launch_running = proj["id"] in LAUNCHED_PROCESSES and LAUNCHED_PROCESSES[proj["id"]].poll() is None
+        launch_running = False
+        if proj["id"] in LAUNCHED_PROCESSES:
+            procs = LAUNCHED_PROCESSES[proj["id"]]
+            if isinstance(procs, list):
+                launch_running = any(p.poll() is None for p in procs)
+            else:
+                launch_running = procs.poll() is None
         status_list.append({"id": proj["id"], "name": proj["name"], "path": str(proj["path"]), "total": total, "completed": done, "active": proj["id"] == ACTIVE_PROJECT_ID, "running": running, "paused": paused, "busy": BUSY_PROJECTS.get(proj["id"], False), "running_version": running_version, "launch_available": launch_config is not None and all_done, "launch_description": launch_config.get("description", "") if launch_config else "", "launch_running": launch_running})
     spec_details = {}
     if active_proj:
@@ -594,7 +610,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 subprocess.Popen(
                     ['node', str(overseer), str(proj_path)],
-                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
                     env=env
                 )
                 self.send_json({"success": True})
@@ -604,8 +620,11 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path == "/api/stop":
             pid = body.get('project_id')
             project = next((p for p in PROJECTS if p['id'] == pid), None) or get_active_project()
-            (Path(project["path"]) / ".ralph-stop").write_text("STOP", encoding='utf-8')
-            self.send_json({"success": True})
+            if project:
+                (Path(project["path"]) / ".ralph-stop").write_text("STOP", encoding='utf-8')
+                self.send_json({"success": True})
+            else:
+                self.send_json({"success": False, "error": "Project not found"})
         elif p.path == "/api/pause":
             pid = body.get('project_id')
             project = next((p for p in PROJECTS if p['id'] == pid), None) or get_active_project()
@@ -658,16 +677,23 @@ class Handler(BaseHTTPRequestHandler):
                 overseer = RALPH_DIR / "ralph-overseer.js"
                 proj_path = project["path"]
                 cmd_str = f'node "{overseer}" "{proj_path}"'
-                subprocess.Popen(f'cmd.exe /k "{cmd_str}"', creationflags=subprocess.CREATE_NEW_CONSOLE)
+                subprocess.Popen(['node', str(overseer), str(proj_path)], creationflags=subprocess.CREATE_NO_WINDOW)
             self.send_json({"success": True})
         elif p.path == "/api/restart-server":
             self.send_json({"success": True})
-            print("--- ПОЛУЧЕН СИГНАЛ ПЕРЕЗАГРУЗКИ СЕРВЕРА ---")
-            def kill_later():
+            print("--- ПЕРЕЗАПУСК СЕРВЕРА ---")
+            def restart_later():
                 time.sleep(0.5)
+                # Запускаем новый экземпляр перед смертью
+                subprocess.Popen(
+                    [sys.executable, str(RALPH_DIR / "ralph-tracker-web.py")],
+                    cwd=str(RALPH_DIR),
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                time.sleep(1)
                 os._exit(0)
             import threading
-            threading.Thread(target=kill_later).start()
+            threading.Thread(target=restart_later, daemon=True).start()
         elif p.path == "/api/clear-stream":
             project = get_active_project()
             if not project:
@@ -782,9 +808,11 @@ class Handler(BaseHTTPRequestHandler):
             if pid in _idea_queues: del _idea_queues[pid]
             if pid in _idea_workers: del _idea_workers[pid]
             if pid in LAUNCHED_PROCESSES:
-                proc = LAUNCHED_PROCESSES.pop(pid)
-                try: proc.kill()
-                except: pass
+                procs = LAUNCHED_PROCESSES.pop(pid)
+                if not isinstance(procs, list): procs = [procs]
+                for proc in procs:
+                    try: subprocess.run(f"taskkill /F /T /PID {proc.pid}", shell=True, capture_output=True)
+                    except: pass
             if pid in BUSY_PROJECTS:
                 del BUSY_PROJECTS[pid]; _save_busy_state()
             _save_launch_state()
@@ -1056,10 +1084,18 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path == "/api/launch-stop":
             pid = body.get('project_id')
             if pid in LAUNCHED_PROCESSES:
-                proc = LAUNCHED_PROCESSES[pid]
-                if proc.poll() is None:
+                procs = LAUNCHED_PROCESSES[pid]
+                if not isinstance(procs, list):
+                    procs = [procs]
+                for proc in procs:
+                    if proc.poll() is None:
+                        try:
+                            subprocess.run(f"taskkill /F /T /PID {proc.pid}", shell=True, capture_output=True)
+                        except: pass
+                # Ждём завершения всех процессов (до 5 секунд)
+                for proc in procs:
                     try:
-                        subprocess.run(f"taskkill /F /T /PID {proc.pid}", shell=True, capture_output=True)
+                        proc.wait(timeout=5)
                     except: pass
                 del LAUNCHED_PROCESSES[pid]
                 _save_launch_state()
@@ -1120,36 +1156,36 @@ class Handler(BaseHTTPRequestHandler):
 def get_dashboard_html():
     return r'''<!DOCTYPE html>
 <html lang="ru"><head><meta charset="UTF-8"><title>Ralph 2.0</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2358a6ff' stroke-width='2.5'%3E%3Cpath d='M12 20.94c1.5 0 2.75 1.06 4 1.06 3 0 6-8 6-12.22A4.91 4.91 0 0 0 17 5c-2.22 0-4 1.44-5 2-1-0.56-2.78-2-5-2a4.9 4.9 0 0 0-5 4.78C2 14 5 22 8 22c1.25 0 2.5-1.06 4-1.06Z'/%3E%3Cpath d='M10 2c1 .5 2 2 2 5'/%3E%3C/svg%3E">
 <style>
     :root { --bg: #0d1117; --card: #161b22; --border: #30363d; --text: #f0f6fc; --blue: #58a6ff; --green: #3fb950; --red: #f85149; --orange: #d29922; --text-dim: #8b949e; --bg-hover: #1f242c; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 0; height: 100vh; overflow: hidden; }
     .container { display: flex; flex-direction: column; height: 100vh; max-width: 100%; }
     .split-view { display: flex; gap: 0; flex: 1; min-height: 0; overflow: hidden; }
-    .col-resizer { width: 16px; min-width: 16px; cursor: col-resize; background: transparent; position: relative; flex-shrink: 0; z-index: 10; transition: background 0.2s; border-radius: 4px; align-self: stretch; margin: 0 -4px; }
+    .col-resizer { width: 12px; min-width: 12px; cursor: col-resize; background: transparent; position: relative; flex-shrink: 0; z-index: 10; transition: background 0.2s; align-self: stretch; margin: 0 -2px; }
     .col-resizer::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 4px; height: 40px; background: var(--border); border-radius: 2px; transition: background 0.2s, height 0.2s; }
     .col-resizer:hover { background: rgba(88,166,255,0.08); }
     .col-resizer:hover::after, .col-resizer.dragging::after { background: var(--blue); height: 60px; }
     .col-resizer.dragging { background: rgba(88,166,255,0.12); }
-    .row-resizer { height: 16px; min-height: 16px; cursor: row-resize; background: transparent; position: relative; flex-shrink: 0; z-index: 10; transition: background 0.2s; border-radius: 4px; margin: -4px 0; }
+    .row-resizer { height: 12px; min-height: 12px; cursor: row-resize; background: transparent; position: relative; flex-shrink: 0; z-index: 10; transition: background 0.2s; margin: -2px 0; }
     .row-resizer::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 40px; height: 4px; background: var(--border); border-radius: 2px; transition: background 0.2s, width 0.2s; }
     .row-resizer:hover { background: rgba(88,166,255,0.08); }
     .row-resizer:hover::after, .row-resizer.dragging::after { background: var(--blue); width: 60px; }
     .row-resizer.dragging { background: rgba(88,166,255,0.12); }
-    .col1 { min-width: 180px; flex: 0 0 18%; display: flex; flex-direction: column; overflow: hidden; }
+    .col1 { min-width: 180px; flex: 0 0 18%; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
     .col1 .projects-section { flex: 1; overflow-y: auto; padding: 8px; }
-    .col2 { min-width: 200px; flex: 0 0 35%; display: flex; flex-direction: column; overflow: hidden; }
+    .col2 { min-width: 200px; flex: 0 0 35%; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
     .col2-header { padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-    .col2-body { flex: 1; overflow-y: overlay; padding: 8px; min-height: 0; }
-    @supports not (overflow-y: overlay) { .col2-body { overflow-y: auto; } }
+    .col2-body { flex: 1; overflow-y: auto; padding: 8px; min-height: 0; }
     .col2-body::-webkit-scrollbar { width: 6px; background: transparent; }
     .col2-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
     .col2-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
     .col3 { min-width: 200px; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-    .col3-top { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 60px; }
+    .col3-top { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 60px; border-bottom: 1px solid var(--border); }
     .col3-top-header { padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; font-weight: 700; color: var(--text-dim); font-size: 0.85em; }
     .col3-top-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
-    .detail-desc-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 40px; }
+    .detail-desc-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 40px; border-bottom: 1px solid var(--border); }
     .detail-result-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 40px; }
     .col3-top-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-dim); font-size: 0.9em; }
     .col3-bottom { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 60px; }
@@ -1175,7 +1211,7 @@ def get_dashboard_html():
     .icon-btn:hover { color: var(--text); background: rgba(255,255,255,0.15); }
     .icon-btn.start { color: var(--green); border-color: rgba(63,185,80,0.3); }
     .icon-btn.stop { color: var(--red); border-color: rgba(248,81,73,0.3); }
-    .model-toggle { display:flex; align-items:center; gap:0; border-radius:5px; overflow:hidden; border:1px solid var(--border); font-size:0.7em; font-weight:700; height:28px; }
+    .model-toggle { display:none; align-items:center; gap:0; border-radius:5px; overflow:hidden; border:1px solid var(--border); font-size:0.7em; font-weight:700; height:28px; }
     .model-toggle .mt-opt { padding:4px 8px; cursor:pointer; transition:0.2s; color:var(--text-dim); background:transparent; user-select:none; }
     .model-toggle .mt-opt:hover { background:rgba(255,255,255,0.05); }
     .model-toggle .mt-opt.active-sonnet { background:rgba(88,166,255,0.15); color:var(--blue); }
@@ -1205,9 +1241,9 @@ def get_dashboard_html():
     .card { background: var(--card); border-radius: 10px; padding: 20px; border: 1px solid var(--border); }
     .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; cursor: pointer; }
     .master-task { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; transition: 0.3s; }
-    .done-group { margin-bottom: 12px; }
-    .done-group-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; border-radius: 6px; transition: 0.2s; font-size: 0.85em; }
-    .done-group-header:hover { background: rgba(63,185,80,0.08); }
+    .task-group { margin-bottom: 4px; }
+    .task-group-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; transition: 0.2s; font-size: 0.85em; background: var(--card); border: 1px solid var(--border); border-radius: 6px; }
+    .task-group-header:hover { background: var(--bg-hover); }
     .master-task.fully-completed { border-color: var(--green); background: rgba(63,185,80,0.05); }
     .master-header { padding: 14px 16px; background: rgba(255,255,255,0.03); cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
     .spec-right { display: flex; align-items: center; gap: 10px; }
@@ -1295,7 +1331,10 @@ def get_dashboard_html():
                 <div id="projectPath" style="font-size:0.75em; color:var(--text-dim); cursor:pointer; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" onclick="if(this.dataset.path) openFolder(this.dataset.path, event)" title="Открыть папку проекта"></div>
                 <button class="idea-btn" style="width:100%; justify-content:center; margin-top:8px; padding:8px;" onclick="showIdeaDialog()">+ Добавить идею</button>
             </div>
-            <div class="col2-body" id="tasksBody"><div id="tasks"></div></div>
+            <div class="col2-body" id="tasksBody">
+                <div id="tasks"></div>
+                <div id="doneSection"></div>
+            </div>
         </div>
         <div class="col-resizer" id="resizer23"></div>
         <!-- Колонка 3: Описание задачи + Консоль -->
@@ -1367,19 +1406,34 @@ def get_dashboard_html():
 
     let activeId = null, renderedProjectId = null, isEditing = false, firstLoadDone = false, menuTarget = null, menuX = 0, menuY = 0;
     const projectModels = JSON.parse(localStorage.getItem('ralph_models') || '{}');
-    function getModel(pid) { return projectModels[pid] || 'sonnet'; }
+    function getModel(pid) { return projectModels[pid] || 'opus'; }
     function saveModels() { localStorage.setItem('ralph_models', JSON.stringify(projectModels)); }
     function toggleModel(pid, ev) { ev.stopPropagation(); projectModels[pid] = getModel(pid)==='sonnet' ? 'opus' : 'sonnet'; saveModels(); refresh(); }
     let prevSpecSignature = '';
 
+    let _actionLock = null; // {id, action, time}
+    function isLocked(id, action) {
+        if (!_actionLock || _actionLock.id !== id) return false;
+        if (Date.now() - _actionLock.time >= 8000) return false;
+        // Stop всегда разрешён, даже если идёт starting
+        if (action === 'stopping') return _actionLock.action === 'stopping';
+        return true;
+    }
+    function setLock(id, action) { _actionLock = {id, action, time: Date.now()}; refresh(); }
+    function clearLock() { _actionLock = null; refresh(); }
+
     async function toggleRun4(id) {
+        if (isLocked(id, 'starting')) return;
+        setLock(id, 'starting');
         switchConsoleTab(4, null);
         await fetch('/api/start4', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_id: id, model: getModel(id) }) });
-        refresh();
+        setTimeout(clearLock, 3000);
     }
     async function stopRun(id) {
+        if (isLocked(id, 'stopping')) return;
+        setLock(id, 'stopping');
         await fetch('/api/stop', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ project_id: id }) });
-        refresh();
+        setTimeout(clearLock, 3000);
     }
     let activeConsoleTab = 4;
     let consoleData = {4: ''};
@@ -1443,8 +1497,10 @@ def get_dashboard_html():
     }
 
     async function togglePause(pid) {
+        if (isLocked(pid, 'pausing')) return;
+        setLock(pid, 'pausing');
         await fetch('/api/pause', { method: 'POST', body: JSON.stringify({ project_id: pid }) });
-        refresh();
+        setTimeout(clearLock, 2000);
     }
 
     function customConfirm(msg, x, y, onConfirm) {
@@ -1532,9 +1588,16 @@ def get_dashboard_html():
             document.getElementById('projects').innerHTML = d.projects.map(p => {
                 const pct = p.total ? Math.round((p.completed / p.total) * 100) : 0;
                 let controls = '';
-                if (p.running) {
+                const locked = _actionLock && _actionLock.id === p.id && (Date.now() - _actionLock.time < 8000);
+                const lockAction = locked ? _actionLock.action : '';
+                const spinnerHtml = '<span class="busy-spinner" style="width:14px;height:14px;border-width:2px"></span>';
+                if (locked) {
+                    const labels = {starting:'Запускается...', stopping:'Останавливается...', pausing:'Пауза...', launch_stopping:'Останавливаю...'};
+                    controls = `<span style="display:flex;align-items:center;gap:6px;color:var(--text-dim);font-size:0.75em;" title="${labels[lockAction]||''}">${spinnerHtml} ${labels[lockAction]||''}</span>`;
+                } else if (p.running) {
                     controls = `
-                        <button class="icon-btn stop" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" onclick="event.stopPropagation(); stopRun('${p.id}')" title="Остановить Ralph 4.0">${ICONS.stop}</button>
+                        <button class="icon-btn stop" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" onclick="event.stopPropagation(); stopRun('${p.id}')" title="Остановить Ralph">${ICONS.stop}</button>
+                        <button class="icon-btn" style="color:var(--blue); border-color:rgba(88,166,255,0.3)" onclick="event.stopPropagation(); showServerLogs()" title="Показать консоль"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg></button>
                         <button class="icon-btn ${p.paused?'start':'pause'}" style="${p.paused?'color:var(--orange);border-color:var(--orange)':''}" onclick="event.stopPropagation(); togglePause('${p.id}')" title="${p.paused?'Продолжить':'Пауза'}">${p.paused?ICONS.play:ICONS.pause}</button>
                     `;
                 } else {
@@ -1544,7 +1607,7 @@ def get_dashboard_html():
                             <div class="mt-opt ${m==='sonnet'?'active-sonnet':''}" onclick="projectModels['${p.id}']='sonnet'; saveModels(); refresh();" title="Sonnet (быстрая, дешёвая)">Sonnet</div>
                             <div class="mt-opt ${m==='opus'?'active-opus':''}" onclick="projectModels['${p.id}']='opus'; saveModels(); refresh();" title="Opus 4.6 (самая мощная)">Opus</div>
                         </div>
-                        <button class="icon-btn start" title="Запуск Ralph 4.0 (${m==='opus'?'Opus 4.6':'Sonnet'})" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" ${p.busy?'disabled':''} onclick="event.stopPropagation(); toggleRun4('${p.id}')">${ICONS.play}</button>
+                        <button class="icon-btn start" title="Запуск Ralph (${m==='opus'?'Opus 4.6':'Sonnet'})" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" ${p.busy?'disabled':''} onclick="event.stopPropagation(); toggleRun4('${p.id}')">${ICONS.play}</button>
                     `;
                 }
                 const statusDot = p.running
@@ -1677,35 +1740,54 @@ def get_dashboard_html():
                 activeH += renderSprintBlock(s, det);
             }
         }
-        let h = '';
+        // Порядок: Выполнено (сверху, свёрнуто) → В работе (снизу, развёрнуто)
+        let allH = '';
         if (doneCount > 0) {
             const collapsed = localStorage.getItem('ralph_doneCollapsed') !== '0';
-            h += `<div class="done-group">
-                <div class="done-group-header" onclick="toggleDoneGroup()">
+            allH += `<div class="task-group">
+                <div class="task-group-header" onclick="toggleTaskGroup('done')">
                     <span id="doneArrow" class="panel-arrow" style="transform:rotate(${collapsed ? '0' : '90'}deg);">&#9654;</span>
                     <span style="color:var(--green); font-weight:700;">Выполнено (${doneCount})</span>
                 </div>
-                <div id="doneGroupBody" style="display:${collapsed ? 'none' : 'block'};">${doneH}</div>
+                <div id="doneGroupBody" class="task-group-body" style="display:${collapsed ? 'none' : 'block'};">${doneH}</div>
             </div>`;
         }
-        h += activeH;
-        document.getElementById('tasks').innerHTML = h;
+        const activeCount = Object.keys(specs).length - doneCount;
+        if (activeCount > 0) {
+            const aCollapsed = localStorage.getItem('ralph_activeCollapsed') === '1';
+            allH += `<div class="task-group">
+                <div class="task-group-header" onclick="toggleTaskGroup('active')">
+                    <span id="activeArrow" class="panel-arrow" style="transform:rotate(${aCollapsed ? '0' : '90'}deg);">&#9654;</span>
+                    <span style="color:var(--blue); font-weight:700;">В работе (${activeCount})</span>
+                </div>
+                <div id="activeGroupBody" class="task-group-body" style="display:${aCollapsed ? 'none' : 'block'};">${activeH}</div>
+            </div>`;
+        }
+        document.getElementById('tasks').innerHTML = allH;
+        document.getElementById('doneSection').innerHTML = '';
     }
 
-    function toggleDoneGroup() {
-        const body = document.getElementById('doneGroupBody');
-        const arrow = document.getElementById('doneArrow');
+    function toggleTaskGroup(which) {
+        const bodyId = which === 'done' ? 'doneGroupBody' : 'activeGroupBody';
+        const arrowId = which === 'done' ? 'doneArrow' : 'activeArrow';
+        const key = which === 'done' ? 'ralph_doneCollapsed' : 'ralph_activeCollapsed';
+        const body = document.getElementById(bodyId);
+        const arrow = document.getElementById(arrowId);
+        if (!body || !arrow) return;
         const isHidden = body.style.display === 'none';
         body.style.display = isHidden ? 'block' : 'none';
         arrow.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
-        localStorage.setItem('ralph_doneCollapsed', isHidden ? '0' : '1');
+        localStorage.setItem(key, isHidden ? '0' : '1');
     }
 
     function updateTaskDataSurgically(specs) {
+        let needRerender = false;
         for (const s in specs) {
             const det = specs[s], safeS = getSafeId(s), mt = document.getElementById(`mt-${safeS}`);
             if (!mt) continue;
             const isDone = det.completed === det.total && det.total > 0;
+            const wasDone = mt.classList.contains('fully-completed');
+            if (isDone !== wasDone) needRerender = true;
             mt.classList.toggle('fully-completed', isDone);
             mt.querySelector('.master-status-icon').innerHTML = isDone ? ICONS.check : '';
             mt.querySelector('.spec-counter').innerText = `${det.completed}/${det.total}`;
@@ -1721,6 +1803,7 @@ def get_dashboard_html():
                 }
             });
         }
+        if (needRerender) renderTaskStructure(specs);
     }
 
         function showMenu(e, id, running, busy, paused) {
@@ -1994,8 +2077,10 @@ def get_dashboard_html():
         refresh();
     }
     async function launchStop(pid) {
+        if (isLocked(pid, 'launch_stopping')) return;
+        setLock(pid, 'launch_stopping');
         await fetch('/api/launch-stop', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:pid})});
-        refresh();
+        clearLock();
     }
     async function generateLaunch(pid) {
         await fetch('/api/generate-launch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:pid})});
@@ -2146,8 +2231,68 @@ def get_dashboard_html():
 </script></body></html>'''
 
 if __name__ == "__main__":
+    # Завершение при закрытии консоли (Windows CTRL_CLOSE_EVENT)
+    import signal
+    def _shutdown(signum, frame):
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Сервер завершён (сигнал {signum})")
+        os._exit(0)
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        def _console_handler(event):
+            if event in (0, 2):  # CTRL_C_EVENT=0, CTRL_CLOSE_EVENT=2
+                os._exit(0)
+            return False
+        HANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
+        kernel32.SetConsoleCtrlHandler(HANDLER_ROUTINE(_console_handler), True)
+    except: pass
+
     print(f"🧸 Ralph 2.0 at http://127.0.0.1:{WEB_PORT}")
-    HTTPServer(('127.0.0.1', WEB_PORT), Handler).serve_forever()
+
+    server = HTTPServer(('127.0.0.1', WEB_PORT), Handler)
+
+    # TrayConsole интеграция
+    _tc = None
+    if _trayconsole_available:
+        _tc = TrayConsoleClient("trayconsole_ralph2")
+
+        @_tc.on("status")
+        def _tc_status():
+            return {"status": "running", "port": WEB_PORT, "projects": len(PROJECTS)}
+
+        @_tc.on("shutdown")
+        def _tc_shutdown():
+            import threading
+            def _do_shutdown():
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Graceful shutdown по команде TrayConsole...")
+                try:
+                    server.shutdown()
+                except: pass
+                if _tc:
+                    try: _tc.stop()
+                    except: pass
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] Сервер остановлен.")
+                os._exit(0)
+            threading.Thread(target=_do_shutdown, daemon=True).start()
+            return {"status": "ok"}
+
+        @_tc.on("custom:open_dashboard")
+        def _tc_open():
+            webbrowser.open(f"http://localhost:{WEB_PORT}")
+            return {"ok": True}
+
+        _tc.start()
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Остановка по Ctrl+C...")
+        server.shutdown()
+        if _tc:
+            try: _tc.stop()
+            except: pass
 
 
 

@@ -24,8 +24,11 @@ show, custom:*) и отправляет JSON-ответы. Работает в �
     client.start()
 """
 
+import ctypes
+import ctypes.wintypes
 import json
 import os
+import pathlib
 import sys
 import threading
 import time
@@ -42,6 +45,10 @@ except ImportError:
         file=sys.stderr,
     )
     raise
+
+
+_HEARTBEAT_INTERVAL = 5
+_HEARTBEAT_DIR = pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "TrayConsole" / "heartbeats"
 
 
 class TrayConsoleClient:
@@ -61,6 +68,9 @@ class TrayConsoleClient:
         self._handle: Optional[object] = None
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._mutex_handle: Optional[int] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_path = _HEARTBEAT_DIR / f"{pipe_name}.json"
 
         # Встроенные обработчики по умолчанию
         self._default_handlers: dict[str, Callable] = {
@@ -93,6 +103,8 @@ class TrayConsoleClient:
             return
 
         self._running = True
+        self._create_mutex()
+        self._start_heartbeat()
         self._thread = threading.Thread(target=self._listen, daemon=True)
         self._thread.start()
 
@@ -100,6 +112,8 @@ class TrayConsoleClient:
         """Остановить клиент и закрыть соединение."""
         self._running = False
         self._close_handle()
+        self._delete_heartbeat()
+        self._release_mutex()
 
     @property
     def is_connected(self) -> bool:
@@ -212,6 +226,8 @@ class TrayConsoleClient:
 
             # Shutdown завершает процесс после отправки ответа
             self._running = False
+            self._delete_heartbeat()
+            self._release_mutex()
             threading.Timer(0.5, lambda: os._exit(0)).start()
             return result
 
@@ -238,6 +254,75 @@ class TrayConsoleClient:
     def _default_shutdown(self) -> dict:
         """Обработчик shutdown по умолчанию."""
         return {"status": "ok"}
+
+    def _start_heartbeat(self):
+        """Запустить daemon-поток записи heartbeat-файла."""
+        try:
+            _HEARTBEAT_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            _log(f"Не удалось создать директорию heartbeats: {e}")
+            return
+
+        self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self._heartbeat_thread.start()
+
+    def _heartbeat_loop(self):
+        """Цикл записи heartbeat каждые _HEARTBEAT_INTERVAL секунд."""
+        while self._running:
+            try:
+                self._write_heartbeat()
+            except Exception as e:
+                _log(f"Ошибка записи heartbeat: {e}")
+
+            # Sleep по 1 сек для быстрого выхода при _running = False
+            for _ in range(_HEARTBEAT_INTERVAL):
+                if not self._running:
+                    break
+                time.sleep(1)
+
+    def _write_heartbeat(self):
+        """Записать heartbeat-файл (атомарно через .tmp + rename)."""
+        data = json.dumps({
+            "pid": os.getpid(),
+            "timestamp": time.time(),
+            "status": "running",
+            "name": self._pipe_name,
+        }, ensure_ascii=False)
+
+        tmp_path = self._heartbeat_path.with_suffix(".json.tmp")
+        tmp_path.write_text(data, encoding="utf-8")
+        tmp_path.replace(self._heartbeat_path)
+
+    def _delete_heartbeat(self):
+        """Удалить heartbeat-файл."""
+        try:
+            self._heartbeat_path.unlink(missing_ok=True)
+        except Exception as e:
+            _log(f"Ошибка удаления heartbeat-файла: {e}")
+
+    def _create_mutex(self):
+        """Создать Named Mutex как маркер работающего процесса."""
+        try:
+            mutex_name = rf"Global\TrayConsole_{self._pipe_name}"
+            handle = ctypes.windll.kernel32.CreateMutexW(None, False, mutex_name)
+            if handle == 0:
+                error = ctypes.GetLastError()
+                _log(f"Не удалось создать mutex: GetLastError={error}")
+            else:
+                self._mutex_handle = handle
+                _log(f"Mutex создан: {mutex_name}")
+        except Exception as e:
+            _log(f"Ошибка создания mutex: {e}")
+
+    def _release_mutex(self):
+        """Освободить Named Mutex."""
+        if self._mutex_handle is not None:
+            try:
+                ctypes.windll.kernel32.CloseHandle(self._mutex_handle)
+                _log("Mutex освобождён")
+            except Exception as e:
+                _log(f"Ошибка освобождения mutex: {e}")
+            self._mutex_handle = None
 
     def _close_handle(self):
         """Закрыть pipe handle."""

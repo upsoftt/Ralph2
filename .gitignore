@@ -10,3 +10,7 @@ tracker_state.json
 projects.json
 *.exe
 package-lock.json
+.shutdown_*
+dist/
+build/
+*.spec
