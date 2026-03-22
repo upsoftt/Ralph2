@@ -1252,7 +1252,7 @@ def get_dashboard_html():
     .subtask { padding: 10px 16px; border-top: 1px solid var(--border); cursor: pointer; transition: 0.2s; }
     .subtask-header { display: flex; align-items: center; gap: 12px; }
     .subtask.done .subtask-header { color: var(--green); }
-    .subtask.selected { background: rgba(88,166,255,0.08); border-left: 3px solid var(--blue); }
+    .subtask.selected { background: rgba(88,166,255,0.15); border-left: 3px solid var(--blue); }
     .desc-box { margin-top: 10px; padding: 15px; background: #05070a; border-radius: 6px; border: 1px solid var(--border); display: none; }
     .desc-box.show { display: block; }
     textarea { width: 100%; background: transparent; border: none; color: #fff; min-height: 100px; outline: none; resize: vertical; font-family: inherit; line-height: 1.5; font-size: 0.95em; }
@@ -1664,6 +1664,11 @@ def get_dashboard_html():
                 renderTaskStructure(d.spec_details);
                 renderedProjectId = activeId;
                 firstLoadDone = true;
+                // Восстановить выделение задачи
+                if (selectedTask) {
+                    const st = document.getElementById(`st-${selectedTask.safeS}-${selectedTask.i}`);
+                    if (st) st.classList.add('selected');
+                }
                 // Подсветить новые задачи и раскрыть спринт
                 if (structureChanged) {
                     for (const s in d.spec_details) {
@@ -1803,7 +1808,14 @@ def get_dashboard_html():
                 }
             });
         }
-        if (needRerender) renderTaskStructure(specs);
+        if (needRerender) {
+            renderTaskStructure(specs);
+            // Восстановить выделение после ререндера
+            if (selectedTask) {
+                const st = document.getElementById(`st-${selectedTask.safeS}-${selectedTask.i}`);
+                if (st) st.classList.add('selected');
+            }
+        }
     }
 
         function showMenu(e, id, running, busy, paused) {

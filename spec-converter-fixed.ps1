@@ -49,14 +49,22 @@ function Create-Spec {
     # ... (function body remains the same but use $Tasks and $CompletedTasks)
     $safeName = $SprintName -replace '[<>:"/\\|?*]', ''
     $safeName = $safeName.Substring(0, [Math]::Min(50, $safeName.Length)).Trim()
-    
+
+    # Проверяем дубликаты по НОМЕРУ спринта (не по полному имени)
+    # Это предотвращает создание второй папки при переименовании спринта
+    $prefix = "{0:D3}-" -f $SprintNum
+    $existingDirs = Get-ChildItem -Path $SpecsDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($prefix) }
+    if ($existingDirs) {
+        $existingDir = $existingDirs[0].FullName
+        $existingSpec = Join-Path $existingDir "spec.md"
+        if (Test-Path $existingSpec) {
+            Write-Host "  Skip: $($existingDirs[0].Name) (exists for sprint $SprintNum)" -ForegroundColor Yellow
+            return 0
+        }
+    }
+
     $specDir = Join-Path $SpecsDir ("{0:D3}-{1}" -f $SprintNum, $safeName)
     $specFile = Join-Path $specDir "spec.md"
-    
-    if (Test-Path $specFile) {
-        Write-Host "  Skip: $specDir (exists)" -ForegroundColor Yellow
-        return 0
-    }
 
     if (!(Test-Path $specDir)) {
         New-Item -ItemType Directory -Path $specDir | Out-Null

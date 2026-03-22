@@ -448,8 +448,8 @@ function sendCommand(ptyProc, cmd) {
  * Извлекает результат задачи из JSONL буфера (чистый текст, без PTY-мусора)
  */
 function extractResult(text) {
-    // Проверяем JSONL буфер (приоритет) + логический буфер PTY (fallback)
-    const source = (jsonlBuffer || '') + '\n' + (logicalBuffer || '');
+    // Используем ТОЛЬКО JSONL буфер — PTY logicalBuffer содержит эхо промптов с шаблоном RALPH_RESULT
+    const source = jsonlBuffer || text;
 
     // ─── Текстовый протокол RALPH_RESULT ───
     // Убираем markdown bold (**) и box-drawing символы (║╔╗╚╝═ и т.д.)
@@ -975,6 +975,9 @@ try {
             const prompt = `ВЫПОЛНИ ЗАДАЧУ ${task.id}: ${task.text}\n\nКОНТЕКСТ: Спецификация задачи в файле ${specRelPath}. Прочитай его для полного описания.\n\nПРАВИЛА:\n1) Работай автономно, не задавай вопросов.\n2) Для записи файлов вне проекта используй путь D:/MyProjects/skills/.\n3) Если Write не работает — используй Bash.${testHint}\n\nВАЖНО: Сначала ВЫПОЛНИ задачу (напиши код, создай файлы, запусти тесты). Только ПОСЛЕ завершения работы выведи отчёт.\nЕсли ты выведешь отчёт без реальной работы — задача будет назначена повторно.\n\nФормат отчёта (заполни SUMMARY реальным описанием проделанной работы):\nRALPH_RESULT\nTASK: ${task.id}\nSUMMARY: <ЗАПОЛНИ: что конкретно сделал, какие файлы создал/изменил>\nSTATUS: DONE\nRALPH_END`;
 
             sendCommand(ptyProcess, prompt);
+            // Очищаем буферы чтобы шаблон RALPH_RESULT из промпта не попал в парсер
+            logicalBuffer = '';
+            jsonlBuffer = '';
 
             let result = await waitForModel(extractResult, 1800);
 
