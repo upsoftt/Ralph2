@@ -448,8 +448,8 @@ function sendCommand(ptyProc, cmd) {
  * Извлекает результат задачи из JSONL буфера (чистый текст, без PTY-мусора)
  */
 function extractResult(text) {
-    // Сначала проверяем JSONL буфер (приоритетный канал данных)
-    const source = jsonlBuffer || text;
+    // Проверяем JSONL буфер (приоритет) + логический буфер PTY (fallback)
+    const source = (jsonlBuffer || '') + '\n' + (logicalBuffer || '');
 
     // ─── Текстовый протокол RALPH_RESULT ───
     // Убираем markdown bold (**) и box-drawing символы (║╔╗╚╝═ и т.д.)
@@ -1001,6 +1001,7 @@ try {
                     summary: result.summary || "Задача выполнена."
                 }, null, 2), 'utf8');
 
+                // Отмечаем в spec.md
                 let specContent = fs.readFileSync(task.file, 'utf8');
                 const lines = specContent.split('\n');
                 for (let i = 0; i < lines.length; i++) {
@@ -1009,6 +1010,19 @@ try {
                     }
                 }
                 fs.writeFileSync(task.file, lines.join('\n'), 'utf8');
+                // Отмечаем в tasks.md
+                const tasksFile = path.join(projectDir, 'tasks.md');
+                if (fs.existsSync(tasksFile)) {
+                    try {
+                        const tLines = fs.readFileSync(tasksFile, 'utf8').split('\n');
+                        for (let j = 0; j < tLines.length; j++) {
+                            if (tLines[j].includes(`{{TASK:${task.id}}}`) && tLines[j].includes('[ ]')) {
+                                tLines[j] = tLines[j].replace('[ ]', '[x]'); break;
+                            }
+                        }
+                        fs.writeFileSync(tasksFile, tLines.join('\n'), 'utf8');
+                    } catch (e) {}
+                }
                 if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
                 fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${task.id}\n**Результат:**\n${result.summary}\n\n---\n\n`, 'utf8');
                 chatLog(`✅ Задача ${task.id} выполнена.`, 'OVERSEER');

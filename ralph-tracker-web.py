@@ -1177,7 +1177,7 @@ def get_dashboard_html():
     .col1 .projects-section { flex: 1; overflow-y: auto; padding: 8px; }
     .col2 { min-width: 200px; flex: 0 0 35%; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
     .col2-header { padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-    .col2-body { flex: 1; overflow-y: auto; padding: 8px; min-height: 0; }
+    .col2-body { flex: 1; overflow-y: auto; padding: 0 8px 8px; min-height: 0; }
     .col2-body::-webkit-scrollbar { width: 6px; background: transparent; }
     .col2-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
     .col2-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
@@ -1242,7 +1242,7 @@ def get_dashboard_html():
     .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; cursor: pointer; }
     .master-task { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; transition: 0.3s; }
     .task-group { margin-bottom: 4px; }
-    .task-group-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; transition: 0.2s; font-size: 0.85em; background: var(--card); border: 1px solid var(--border); border-radius: 6px; }
+    .task-group-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; transition: 0.2s; font-size: 0.85em; background: var(--card); border: 1px solid var(--border); border-radius: 6px; position: sticky; top: -1px; z-index: 5; }
     .task-group-header:hover { background: var(--bg-hover); }
     .master-task.fully-completed { border-color: var(--green); background: rgba(63,185,80,0.05); }
     .master-header { padding: 14px 16px; background: rgba(255,255,255,0.03); cursor: pointer; display: flex; justify-content: space-between; align-items: center; font-weight: bold; }
@@ -1702,11 +1702,11 @@ def get_dashboard_html():
     function renderSprintBlock(s, det) {
         const safeS = getSafeId(s);
         return `<div class="master-task" id="mt-${safeS}" data-spec-name="${s}">
-            <div class="master-header" onclick="toggleSpec('${safeS}')"><div style="display:flex; align-items:center; gap:10px"><span class="master-status-icon"></span><span>${esc(s)}</span></div><div class="spec-right"><div class="spec-progress-bar"><div class="spec-progress-fill"></div></div><span class="spec-counter">0/0</span></div></div>
-            <div id="body-${safeS}" style="display:none">
-                ${det.tasks.map((t, i) => `<div class="subtask" id="st-${safeS}-${i}" data-task-id="${i}">
+            <div class="master-header" onclick="toggleSpec('${safeS}')"><div style="display:flex; align-items:center; gap:10px"><span class="master-status-icon">${det.completed === det.total && det.total > 0 ? ICONS.check : ''}</span><span>${esc(s)}</span></div><div class="spec-right"><div class="spec-progress-bar"><div class="spec-progress-fill" style="width:${det.total ? (det.completed/det.total*100) : 0}%"></div></div><span class="spec-counter">${det.completed}/${det.total}</span></div></div>
+            <div id="body-${safeS}" style="display:${_openSpecs.has(safeS) ? 'block' : 'none'}">
+                ${det.tasks.map((t, i) => `<div class="subtask ${t.done?'done':''}" id="st-${safeS}-${i}" data-task-id="${i}">
                     <div class="subtask-header" onclick="toggleSubtask('${safeS}', ${i}, '${s}', '${t.text.replace(/'/g,"\\'")}')">
-                        <span class="task-status-icon" onclick="event.stopPropagation(); manualToggle('${s}', ${i}, ${t.done}, event)"></span>
+                        <span class="task-status-icon">${t.done ? ICONS.check : ICONS.square}</span>
                         <span style="font-weight:bold; color:var(--blue); min-width:30px;">${getTaskNumber(t.text)}</span><span>${esc(cleanTaskText(t.text))}</span>
                     </div>
                     <div class="desc-box" id="desc-${safeS}-${i}">
@@ -1912,7 +1912,13 @@ def get_dashboard_html():
     if (localStorage.getItem('ralph_console_collapsed') === '1') {
         setTimeout(toggleConsole, 100);
     }
-    function toggleSpec(safeS) { const el = document.getElementById(`body-${safeS}`); el.style.display = el.style.display === 'none' ? 'block' : 'none'; }
+    const _openSpecs = new Set();
+    function toggleSpec(safeS) {
+        const el = document.getElementById(`body-${safeS}`);
+        const opening = el.style.display === 'none';
+        el.style.display = opening ? 'block' : 'none';
+        if (opening) _openSpecs.add(safeS); else _openSpecs.delete(safeS);
+    }
     let selectedTask = null;
     function toggleSubtask(safeS, i, s, text) {
         // Показываем описание в колонке 3
