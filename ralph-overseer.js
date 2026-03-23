@@ -972,7 +972,20 @@ try {
                 : '';
             // Относительный путь spec-файла для контекста
             const specRelPath = path.relative(projectDir, task.file).replace(/\\/g, '/');
-            const prompt = `ВЫПОЛНИ ЗАДАЧУ ${task.id}: ${task.text}\n\nКОНТЕКСТ: Спецификация задачи в файле ${specRelPath}. Прочитай его для полного описания.\n\nПРАВИЛА:\n1) Работай автономно, не задавай вопросов.\n2) Для записи файлов вне проекта используй путь D:/MyProjects/skills/.\n3) Если Write не работает — используй Bash.${testHint}\n\nВАЖНО: Сначала ВЫПОЛНИ задачу (напиши код, создай файлы, запусти тесты). Только ПОСЛЕ завершения работы выведи отчёт.\nЕсли ты выведешь отчёт без реальной работы — задача будет назначена повторно.\n\nФормат отчёта (заполни SUMMARY реальным описанием проделанной работы):\nRALPH_RESULT\nTASK: ${task.id}\nSUMMARY: <ЗАПОЛНИ: что конкретно сделал, какие файлы создал/изменил>\nSTATUS: DONE\nRALPH_END`;
+            // Проверяем наличие референсных изображений
+            const specDirPath = path.dirname(task.file);
+            const refsPath = path.join(specDirPath, 'refs');
+            let refsHint = '';
+            try {
+                if (fs.existsSync(refsPath)) {
+                    const refFiles = fs.readdirSync(refsPath).filter(f => /\.(png|jpg|jpeg|gif|svg|webp)$/i.test(f));
+                    if (refFiles.length > 0) {
+                        const refsRelPath = path.relative(projectDir, refsPath).replace(/\\/g, '/');
+                        refsHint = `\nРЕФЕРЕНСЫ: В папке ${refsRelPath}/ есть визуальные референсы: ${refFiles.join(', ')}. Прочитай их через Read tool для понимания визуального контекста задачи.`;
+                    }
+                }
+            } catch (e) {}
+            const prompt = `ВЫПОЛНИ ЗАДАЧУ ${task.id}: ${task.text}\n\nКОНТЕКСТ: Спецификация задачи в файле ${specRelPath}. Прочитай его для полного описания.${refsHint}\n\nПРАВИЛА:\n1) Работай автономно, не задавай вопросов.\n2) Для записи файлов вне проекта используй путь D:/MyProjects/skills/.\n3) Если Write не работает — используй Bash.\n4) Используй доступные скиллы (Skill tool) если они подходят для задачи — профильные агенты, TDD, debugging, brainstorming и другие.${testHint}\n\nВАЖНО: Сначала ВЫПОЛНИ задачу (напиши код, создай файлы, запусти тесты). Только ПОСЛЕ завершения работы выведи отчёт.\nЕсли ты выведешь отчёт без реальной работы — задача будет назначена повторно.\n\nФормат отчёта (заполни SUMMARY реальным описанием проделанной работы):\nRALPH_RESULT\nTASK: ${task.id}\nSUMMARY: <ЗАПОЛНИ: что конкретно сделал, какие файлы создал/изменил>\nSTATUS: DONE\nRALPH_END`;
 
             sendCommand(ptyProcess, prompt);
             // Очищаем буферы чтобы шаблон RALPH_RESULT из промпта не попал в парсер

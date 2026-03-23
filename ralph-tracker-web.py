@@ -436,7 +436,7 @@ def update_status():
                 launch_running = any(p.poll() is None for p in procs)
             else:
                 launch_running = procs.poll() is None
-        status_list.append({"id": proj["id"], "name": proj["name"], "path": str(proj["path"]), "total": total, "completed": done, "active": proj["id"] == ACTIVE_PROJECT_ID, "running": running, "paused": paused, "busy": BUSY_PROJECTS.get(proj["id"], False), "running_version": running_version, "launch_available": launch_config is not None and all_done, "launch_description": launch_config.get("description", "") if launch_config else "", "launch_running": launch_running})
+        status_list.append({"id": proj["id"], "name": proj["name"], "path": str(proj["path"]), "total": total, "completed": done, "active": proj["id"] == ACTIVE_PROJECT_ID, "running": running, "paused": paused, "busy": BUSY_PROJECTS.get(proj["id"], False), "running_version": running_version, "all_done": all_done, "launch_available": launch_config is not None, "launch_description": launch_config.get("description", "") if launch_config else "", "launch_running": launch_running})
     spec_details = {}
     if active_proj:
         try:
@@ -962,50 +962,39 @@ class Handler(BaseHTTPRequestHandler):
                             except: pass
                             return snap
                         before_snap = get_spec_snapshot()
-                        # Формируем промпт с полным контекстом проекта
-                        if count == 1:
-                            ideas_block = f'Идея: {ideas[0]}'
-                        else:
-                            ideas_block = 'Идеи (обработай ВСЕ за один раз):\n' + '\n'.join(f'{i+1}. {idea}' for i, idea in enumerate(ideas))
-                        prompt = (
-                            'Ты — архитектор проекта. Тебе нужно добавить новые задачи в проект.\n\n'
-                            'СНАЧАЛА изучи полный контекст проекта для понимания целей, архитектуры и текущего состояния:\n'
-                            '1. PRD.md — цели, требования, целевая аудитория\n'
-                            '2. planning.md — архитектура, технические решения, стек\n'
-                            '3. tasks.md — текущий план задач и их статус\n'
-                            '4. Все файлы specs/*/spec.md — детальные спецификации спринтов\n'
-                            '5. CLAUDE.md — правила и соглашения проекта\n\n'
-                            'ЗАТЕМ проанализируй следующие идеи и для КАЖДОЙ:\n'
-                            '1) Определи наиболее подходящий существующий спринт. Если ни один не подходит — создай новый (папка в specs/ + секция в tasks.md).\n'
-                            '2) Определи правильный номер TASK (спринт.подзадача), чтобы не было конфликтов с существующими.\n'
-                            '3) Назначь роль [Role: ...] исходя из характера задачи.\n'
-                            '4) Напиши подробное описание в формате ПОДРОБНОСТИ: Что сделать, Как сделать, Ограничения, Критерии приёмки.\n'
-                            '5) Добавь задачу в spec.md соответствующего спринта И в tasks.md.\n\n'
-                            f'{ideas_block}'
-                        )
+                        # Запускаем ralph-idea.js — мини-overseer с PTY и доступом к скиллам
                         try:
-                            claude_exe = _claude_exe
+                            idea_script = os.path.join(RALPH_DIR, 'ralph-idea.js')
+                            cmd_args = ['node', idea_script, proj_path] + ideas
                             proc = subprocess.Popen(
-                                [claude_exe, '--dangerously-skip-permissions', '-p', prompt],
-                                cwd=proj_path,
+                                cmd_args,
+                                cwd=str(RALPH_DIR),
                                 stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
+                                stderr=subprocess.STDOUT,
                                 encoding='utf-8',
-                                errors='replace'
+                                errors='replace',
+                                creationflags=0x08000000  # CREATE_NO_WINDOW
                             )
                             while proc.poll() is None:
-                                time.sleep(1)
+                                time.sleep(2)
                                 after_snap = get_spec_snapshot()
                                 if after_snap != before_snap:
                                     print(f"[IDEA] Spec files changed, clearing busy status")
                                     if project_id in BUSY_PROJECTS:
                                         del BUSY_PROJECTS[project_id]; _save_busy_state()
-                                    break
+                                    before_snap = after_snap  # Продолжаем мониторить
                             try:
-                                proc.wait(timeout=120)
+                                proc.wait(timeout=660)
                             except subprocess.TimeoutExpired:
                                 proc.kill()
-                            print(f"[IDEA] Claude exit code: {proc.returncode}, processed {count} idea(s)")
+                            # Логируем вывод ralph-idea.js
+                            try:
+                                output = proc.stdout.read()
+                                if output:
+                                    for line in output.strip().split('\n'):
+                                        print(f"  {line}")
+                            except: pass
+                            print(f"[IDEA] ralph-idea.js exit code: {proc.returncode}, processed {count} idea(s)")
                         except Exception as e:
                             print(f"Idea generation error: {e}")
                     if project_id in BUSY_PROJECTS:
@@ -1401,7 +1390,8 @@ def get_dashboard_html():
         check: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>',
         square: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="4"/></svg>',
         chevron: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>',
-        copy: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>'
+        copy: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>',
+        launch: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" stroke="currentColor" stroke-width="2"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" stroke="currentColor" stroke-width="2"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 3 0 3 0" stroke="currentColor" stroke-width="2"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-3 0-3" stroke="currentColor" stroke-width="2"/><path d="M20 7l1-2.5L23.5 5l-2.5-1L20 1.5 19 4l-2.5 1L19 6z" fill="#a78bfa" opacity="0.9"/><path d="M3.5 8l.6-1.5L5.5 6l-1.4-.5L3.5 4 2.9 5.5 1.5 6l1.4.5z" fill="#a78bfa" opacity="0.6"/></svg>'
     };
 
     let activeId = null, renderedProjectId = null, isEditing = false, firstLoadDone = false, menuTarget = null, menuX = 0, menuY = 0;
@@ -1600,6 +1590,9 @@ def get_dashboard_html():
                         <button class="icon-btn" style="color:var(--blue); border-color:rgba(88,166,255,0.3)" onclick="event.stopPropagation(); showServerLogs()" title="Показать консоль"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg></button>
                         <button class="icon-btn ${p.paused?'start':'pause'}" style="${p.paused?'color:var(--orange);border-color:var(--orange)':''}" onclick="event.stopPropagation(); togglePause('${p.id}')" title="${p.paused?'Продолжить':'Пауза'}">${p.paused?ICONS.play:ICONS.pause}</button>
                     `;
+                } else if (p.all_done && p.total > 0) {
+                    // Все задачи выполнены — показываем Launch вместо Play
+                    controls = '';
                 } else {
                     const m = getModel(p.id);
                     controls = `
@@ -1614,15 +1607,15 @@ def get_dashboard_html():
                     ? (p.paused ? '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--orange);box-shadow:0 0 6px var(--orange);flex-shrink:0" title="Пауза"></span>'
                                 : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green);flex-shrink:0;animation:busySpin 1.5s linear infinite" title="Запущен"></span>')
                     : '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--text-dim);flex-shrink:0" title="Остановлен"></span>';
-                // Launch-кнопка встраивается в ряд прогресса
+                // Launch-кнопка: показывается когда все задачи выполнены и есть launch.json
                 let launchBtn = '';
-                if (p.launch_available) {
+                if (p.all_done && p.total > 0 && p.launch_available) {
                     const launchTitle = esc(p.launch_description) || 'Запустить приложение';
                     launchBtn = p.launch_running
-                        ? `<button class="launch-btn running" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchStop('${p.id}')" title="${launchTitle}">⏹</button>`
-                        : `<button class="launch-btn" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchProject('${p.id}')" title="${launchTitle}">🚀</button>`;
+                        ? `<button class="launch-btn running" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchStop('${p.id}')" title="${launchTitle}">${ICONS.stop}</button>`
+                        : `<button class="launch-btn" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchProject('${p.id}')" title="${launchTitle}">${ICONS.launch}</button>`;
                 }
-                return `<div class="project-item ${p.active?'active':''}" onclick="setProject('${p.id}')" oncontextmenu="event.preventDefault(); showMenu(event, '${p.id}', ${p.running}, ${!!p.busy}, ${!!p.paused})">
+                return `<div class="project-item ${p.active?'active':''}" onclick="setProject('${p.id}')" oncontextmenu="event.preventDefault(); showMenu(event, '${p.id}', ${p.running}, ${!!p.busy}, ${!!p.paused}, ${!!(p.all_done && p.total > 0)})">
                     <div class="project-row1">
                         <div class="project-row1-left">${statusDot}<strong class="project-name-text" title="${esc(p.name)}">${esc(p.name)}</strong>${p.busy ? '<span class="busy-badge" style="font-size:0.7em;padding:1px 7px"><span class="busy-spinner" style="width:10px;height:10px"></span>'+esc(p.busy)+'</span>' : ''}</div>
                         <div class="project-row1-right">${controls}</div>
@@ -1818,8 +1811,8 @@ def get_dashboard_html():
         }
     }
 
-        function showMenu(e, id, running, busy, paused) {
-            e.stopPropagation(); menuTarget = { id, running, busy, paused };
+        function showMenu(e, id, running, busy, paused, allDone) {
+            e.stopPropagation(); menuTarget = { id, running, busy, paused, allDone };
             menuX = e.pageX; menuY = e.pageY;
             const menu = document.getElementById('ctxMenu');
             menu.style.display = 'block';
@@ -1835,11 +1828,16 @@ def get_dashboard_html():
             menu.style.left = left + 'px';
             menu.style.top = top + 'px';
     
-            document.getElementById('m-text-run').innerText = running ? 'Остановить' : 'Запустить';
-            document.getElementById('m-icon-run').innerHTML = running ? ICONS.stop : ICONS.play;
             const runItem = document.getElementById('m-text-run').parentElement;
-            if (running) { runItem.classList.remove('success'); runItem.classList.add('danger'); }
-            else { runItem.classList.remove('danger'); runItem.classList.add('success'); }
+            if (allDone && !running) {
+                runItem.style.display = 'none';
+            } else {
+                runItem.style.display = '';
+                document.getElementById('m-text-run').innerText = running ? 'Остановить' : 'Запустить';
+                document.getElementById('m-icon-run').innerHTML = running ? ICONS.stop : ICONS.play;
+                if (running) { runItem.classList.remove('success'); runItem.classList.add('danger'); }
+                else { runItem.classList.remove('danger'); runItem.classList.add('success'); }
+            }
             
             const pauseItem = document.getElementById('m-item-pause');
             if (running) {

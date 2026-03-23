@@ -83,6 +83,32 @@ function Create-Spec {
     $specDirName = "{0:D3}-{1}" -f $SprintNum, $safeName
     $specPath = "specs/$specDirName/spec.md"
 
+    # Извлечение референсов из задач спринта
+    $refsSection = ""
+    $refsDir = Join-Path $ProjectDir "refs"
+    $specRefsDir = Join-Path $specDir "refs"
+    $allTasksText = ($CompletedTasks + $Tasks) -join "`n"
+    $refLines = [regex]::Matches($allTasksText, '-\s*ref:\s*(\S+)\s*-\s*(.+)')
+    if ($refLines.Count -gt 0) {
+        $refsSection = "`n## Референсы`n"
+        if (!(Test-Path $specRefsDir)) {
+            New-Item -ItemType Directory -Path $specRefsDir | Out-Null
+        }
+        foreach ($ref in $refLines) {
+            $refFile = $ref.Groups[1].Value
+            $refDesc = $ref.Groups[2].Value.Trim()
+            $srcPath = Join-Path $refsDir $refFile
+            if (Test-Path $srcPath) {
+                Copy-Item $srcPath (Join-Path $specRefsDir $refFile) -Force
+                $refsSection += "- ![$refDesc](refs/$refFile)`n"
+                Write-Host "    Ref copied: $refFile" -ForegroundColor Magenta
+            } else {
+                $refsSection += "- $refFile - $refDesc (файл не найден)`n"
+                Write-Host "    Ref NOT FOUND: $refFile" -ForegroundColor Yellow
+            }
+        }
+    }
+
     $content = "# Спринт ${SprintNum}: $SprintName`n`n" +
                "## Команда запуска для Ralph Runner`n" +
                "``claude -p `"Прочитай этот файл ($specPath). Найди ПЕРВУЮ невыполненную задачу (где стоит [ ]). Выполни ТОЛЬКО ЕЁ ОДНУ. Строго следуй правилам из claude.md и применяй глобальные навыки (TDD, Debugging). ПОСЛЕ ВЫПОЛНЕНИЯ: 1) Обнови этот файл spec.md и корневой tasks.md, отметив только ЭТУ выполненную задачу крестиком [x]. 2) В конце выведи маркер <promise>DONE</promise>, а затем напиши блок <report>...</report>, внутри которого должен быть только строгий JSON с ключами: 'exact_task_name' (в точности скопируй строку задачи из файла), 'summary' (подробное описание того, что сделано), 'skills_used' (массив названий навыков, которые ты применил).`"``" +
@@ -92,6 +118,7 @@ function Create-Spec {
                "- [PRD](../../PRD.md)`n`n" +
                "## Tasks`n`n" +
                "$tasksText`n`n" +
+               "$refsSection" +
                "## Критерии завершения`n" +
                "- [ ] Все $incompleteCount невыполненных задач реализованы и протестированы.`n" +
                "- [ ] Файл ``tasks.md`` обновлен (поставлены [x] для завершенных пунктов).`n"
