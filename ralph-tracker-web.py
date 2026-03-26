@@ -520,8 +520,9 @@ class Handler(BaseHTTPRequestHandler):
                 if report_path.exists():
                     try:
                         data = json.loads(report_path.read_text(encoding='utf-8'))
+                        brief = data.get('brief', '')
                         summary = data.get('summary', data.get('result', 'No summary available.'))
-                        self.send_json({"success": True, "summary": summary})
+                        self.send_json({"success": True, "brief": brief, "summary": summary})
                         return
                     except: pass
             self.send_json({"success": False})
@@ -2051,12 +2052,17 @@ def get_dashboard_html():
         // Показываем в col3
         const detailResults = document.getElementById('detailResults');
         if (detailResults) {
-            if (d.success) detailResults.innerHTML = `<div class="res-box">${esc(d.summary)}</div>`;
-            else detailResults.innerHTML = '';
+            if (d.success) {
+                const briefHtml = d.brief ? `<div style="color:#4ade80;font-size:13px;margin-bottom:8px;font-weight:500">${esc(d.brief)}</div>` : '';
+                detailResults.innerHTML = `<div class="res-box">${briefHtml}<div style="color:#999;font-size:11px">${esc(d.summary)}</div></div>`;
+            } else detailResults.innerHTML = '';
         }
         // Также обновляем inline (для совместимости)
         const resEl = document.getElementById(`res-${safeS}-${i}`);
-        if(d.success && resEl && resEl.innerHTML === '') resEl.innerHTML = `<div class="res-box">${esc(d.summary)}</div>`;
+        if(d.success && resEl && resEl.innerHTML === '') {
+            const briefHtml = d.brief ? `<div style="color:#4ade80;font-size:12px;margin-bottom:4px">${esc(d.brief)}</div>` : '';
+            resEl.innerHTML = `<div class="res-box">${briefHtml}<div style="color:#999;font-size:11px">${esc(d.summary)}</div></div>`;
+        }
         else if (!d.success && resEl) resEl.innerHTML = '';
     }
     async function saveDesc(spec, task, safeS, i) {

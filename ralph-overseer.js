@@ -382,7 +382,11 @@ function updateThinkingStatus(text) {
     if (changed) {
         const fullStatus = `${currentStatusBar} | ${currentThinkingLine}`.replace(/^ \| /, '').replace(/ \| $/, '');
         if (fullStatus.trim()) {
-            fs.writeFileSync(thinkingStatusFile, fullStatus, 'utf8');
+            try {
+                fs.writeFileSync(thinkingStatusFile, fullStatus, 'utf8');
+            } catch (e) {
+                // File may be locked during heavy I/O — skip silently
+            }
         }
     }
 }
@@ -467,6 +471,7 @@ function extractResult(text) {
 
     if (block) {
         const taskMatch = block.match(/TASK:\s*(.+)/i);
+        const briefMatch = block.match(/BRIEF:\s*(.*?)(?=\n|SUMMARY:|STATUS:|RALPH_END)/i);
         const summaryMatch = block.match(/SUMMARY:\s*([\s\S]*?)(?=STATUS:|RALPH_END)/i);
         const statusMatch = block.match(/STATUS:\s*(DONE|FAIL)/i);
 
@@ -493,9 +498,11 @@ function extractResult(text) {
                 }
                 if (summary.length < 10) summary = "Задача выполнена (отчёт в нестандартном формате).";
             }
+            const brief = briefMatch ? briefMatch[1].trim() : '';
             return {
                 status: statusMatch[1].toUpperCase(),
                 task_id: taskMatch ? taskMatch[1].trim() : "unknown",
+                brief: brief,
                 summary: summary
             };
         }
@@ -685,7 +692,7 @@ try {
             } else if (lastThinkingTime > 0 && Date.now() - lastThinkingTime > 60000) {
                 currentState = 'IDLE';
                 currentThinkingLine = '';
-                fs.writeFileSync(thinkingStatusFile, '', 'utf8');
+                try { fs.writeFileSync(thinkingStatusFile, '', 'utf8'); } catch (e) {}
             }
 
             // PTY буфер — только для ready-детекции при загрузке
@@ -886,6 +893,108 @@ try {
         writeStatus(true, { testCommands: detectedTestCommands });
     }
 
+    // ─── СПРИНТ-АУДИТ: определение границ спринта ───────────────
+    function getSprintNumber(taskId) {
+        return taskId.split('.')[0];
+    }
+
+    function getSprintTasks(sprintNum) {
+        const walk = (dir) => {
+            let r = [];
+            if (!fs.existsSync(dir)) return [];
+            fs.readdirSync(dir).forEach(f => {
+                const p = path.join(dir, f);
+                if (fs.statSync(p).isDirectory()) r = r.concat(walk(p));
+                else if (f.endsWith('spec.md')) r.push(p);
+            });
+            return r;
+        };
+        const specs = walk(specsDir).sort();
+        const tasks = [];
+        for (const s of specs) {
+            const content = fs.readFileSync(s, 'utf8');
+            const re = /^-\s+\[([ x])\]\s+[\s\S]*?\{\{TASK:(\d+\.\d+)\}\}/gm;
+            let m;
+            while ((m = re.exec(content)) !== null) {
+                if (m[2].split('.')[0] === sprintNum) {
+                    tasks.push({ id: m[2], done: m[1] === 'x', file: s });
+                }
+            }
+        }
+        return tasks;
+    }
+
+    function isSprintComplete(sprintNum) {
+        const tasks = getSprintTasks(sprintNum);
+        return tasks.length > 0 && tasks.every(t => t.done);
+    }
+
+    function getSprintTitle(sprintNum) {
+        const tasksFile = path.join(projectDir, 'tasks.md');
+        if (!fs.existsSync(tasksFile)) return `Sprint ${sprintNum}`;
+        try {
+            const content = fs.readFileSync(tasksFile, 'utf8');
+            const match = content.match(new RegExp(`##\\s*(?:Sprint|Спринт)\\s*${sprintNum}[:\\s]+(.+)`, 'i'));
+            return match ? match[1].trim() : `Sprint ${sprintNum}`;
+        } catch (e) { return `Sprint ${sprintNum}`; }
+    }
+
+    function extractAuditResult(text) {
+        const source = jsonlBuffer || text;
+        if (source.includes('RALPH_AUDIT_OK')) return 'OK';
+        if (source.includes('RALPH_AUDIT_FIX')) return 'FIX';
+        return null;
+    }
+
+    async function auditSprint(sprintNum) {
+        const sprintTitle = getSprintTitle(sprintNum);
+        chatLog(`🔍 Аудит спринта ${sprintNum}: ${sprintTitle}...`, 'OVERSEER');
+
+        const tasks = getSprintTasks(sprintNum);
+        const taskList = tasks.map(t => `  - ${t.id}: ${t.done ? 'DONE' : 'PENDING'}`).join(' | ');
+
+        const auditPrompt = [
+            `Используй скилл /ralph-auditor (вызови через Skill tool) для аудита ТОЛЬКО спринта ${sprintNum} ("${sprintTitle}").`,
+            `Все задачи спринта ${sprintNum} выполнены: ${taskList}.`,
+            `ИНСТРУКЦИИ:`,
+            `1) Прочитай tasks.md и spec-файлы для спринта ${sprintNum} (папки specs/${sprintNum.toString().padStart(3,'0')}-*)`,
+            `2) Проверь РЕАЛИЗАЦИЮ каждой задачи — открой реальный код и проверь соответствие требованиям`,
+            `3) Сверь с PRD.md`,
+            ``,
+            `КРИТИЧЕСКИ ВАЖНО — ВЫБЕРИ РОВНО ОДИН ОТВЕТ:`,
+            ``,
+            `Вариант А) Если реальных проблем НЕТ (код работает, функционал реализован) — выведи ТОЛЬКО слово:`,
+            `RALPH_AUDIT_OK`,
+            `НЕ вызывай /task-architect, НЕ вызывай /ralph-spec-creator, НЕ создавай задач. Просто RALPH_AUDIT_OK.`,
+            ``,
+            `Вариант Б) Если есть РЕАЛЬНЫЕ проблемы (баги, нерабочий код, пропущенный функционал из PRD):`,
+            `- Используй /task-architect чтобы ДОБАВИТЬ задачи-доработки в КОНЕЦ спринта ${sprintNum}`,
+            `- Затем вызови /ralph-spec-creator для генерации спецификаций`,
+            `- После этого выведи ТОЛЬКО слово: RALPH_AUDIT_FIX`,
+            ``,
+            `НЕ ЯВЛЯЮТСЯ проблемами: стиль кода, косметика, "можно сделать лучше", устаревшие комментарии, отсутствие тестов если они не требовались. Выводи RALPH_AUDIT_FIX ТОЛЬКО если ты реально добавил задачи через /task-architect.`
+        ].join(' ');
+
+        logicalBuffer = '';
+        jsonlBuffer = '';
+        sendCommand(ptyProcess, auditPrompt);
+
+        const auditResult = await waitForModel(extractAuditResult, 600);
+
+        if (auditResult === 'FIX') {
+            chatLog(`🔧 Аудит спринта ${sprintNum}: найдены доработки, задачи добавлены.`, 'OVERSEER');
+            return true;
+        } else if (auditResult === 'OK') {
+            chatLog(`✅ Аудит спринта ${sprintNum}: всё в порядке.`, 'OVERSEER');
+            return false;
+        } else {
+            chatLog(`⚠️ Аудит спринта ${sprintNum}: не получен чёткий ответ. Продолжаем.`, 'OVERSEER');
+            return false;
+        }
+    }
+
+    let lastCompletedSprint = null;
+
     function findNextTask() {
         const walk = (dir) => {
             let r = [];
@@ -985,7 +1094,7 @@ try {
                     }
                 }
             } catch (e) {}
-            const prompt = `ВЫПОЛНИ ЗАДАЧУ ${task.id}: ${task.text}\n\nКОНТЕКСТ: Спецификация задачи в файле ${specRelPath}. Прочитай его для полного описания.${refsHint}\n\nПРАВИЛА:\n1) Работай автономно, не задавай вопросов.\n2) Для записи файлов вне проекта используй путь D:/MyProjects/skills/.\n3) Если Write не работает — используй Bash.\n4) Используй доступные скиллы (Skill tool) если они подходят для задачи — профильные агенты, TDD, debugging, brainstorming и другие.${testHint}\n\nВАЖНО: Сначала ВЫПОЛНИ задачу (напиши код, создай файлы, запусти тесты). Только ПОСЛЕ завершения работы выведи отчёт.\nЕсли ты выведешь отчёт без реальной работы — задача будет назначена повторно.\n\nФормат отчёта (заполни SUMMARY реальным описанием проделанной работы):\nRALPH_RESULT\nTASK: ${task.id}\nSUMMARY: <ЗАПОЛНИ: что конкретно сделал, какие файлы создал/изменил>\nSTATUS: DONE\nRALPH_END`;
+            const prompt = `ВЫПОЛНИ ЗАДАЧУ ${task.id}: ${task.text}\n\nКОНТЕКСТ: Спецификация задачи в файле ${specRelPath}. Прочитай его для полного описания.${refsHint}\n\nПРАВИЛА:\n1) Работай автономно, не задавай вопросов.\n2) Для записи файлов вне проекта используй путь D:/MyProjects/skills/.\n3) Если Write не работает — используй Bash.\n4) Используй доступные скиллы (Skill tool) если они подходят для задачи — профильные агенты, TDD, debugging, brainstorming и другие.${testHint}\n\nВАЖНО: Сначала ВЫПОЛНИ задачу (напиши код, создай файлы, запусти тесты). Только ПОСЛЕ завершения работы выведи отчёт.\nЕсли ты выведешь отчёт без реальной работы — задача будет назначена повторно.\n\nФормат отчёта:\nRALPH_RESULT\nTASK: ${task.id}\nBRIEF: <1 предложение простым языком: что сделано с точки зрения пользователя, БЕЗ имён файлов/классов/функций>\nSUMMARY: <техническое описание: какие файлы создал/изменил, что конкретно сделал>\nSTATUS: DONE\nRALPH_END`;
 
             sendCommand(ptyProcess, prompt);
             // Очищаем буферы чтобы шаблон RALPH_RESULT из промпта не попал в парсер
@@ -1014,6 +1123,7 @@ try {
                 fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
                     status: "READY",
                     task_id: result.task_id || task.id,
+                    brief: result.brief || '',
                     summary: result.summary || "Задача выполнена."
                 }, null, 2), 'utf8');
 
@@ -1040,8 +1150,22 @@ try {
                     } catch (e) {}
                 }
                 if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
-                fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${task.id}\n**Результат:**\n${result.summary}\n\n---\n\n`, 'utf8');
-                chatLog(`✅ Задача ${task.id} выполнена.`, 'OVERSEER');
+                const taskTitle = task.text.split('\n')[0].replace(/\{\{TASK:[\d.]+\}\}/g, '').trim();
+                const briefLine = result.brief || taskTitle;
+                fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${task.id}: ${taskTitle}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${result.summary}\n\n</details>\n\n---\n\n`, 'utf8');
+                chatLog(`✅ ${task.id}: ${briefLine}`, 'OVERSEER');
+
+                // ─── АУДИТ СПРИНТА: проверяем границу ───
+                const currentSprint = getSprintNumber(task.id);
+                if (isSprintComplete(currentSprint) && lastCompletedSprint !== currentSprint) {
+                    lastCompletedSprint = currentSprint;
+                    chatLog(`📋 Спринт ${currentSprint} полностью завершён. Запускаю аудит...`, 'OVERSEER');
+                    const hasNewTasks = await auditSprint(currentSprint);
+                    if (hasNewTasks) {
+                        chatLog(`🔄 Аудитор добавил доработки в спринт ${currentSprint}. Выполняю...`, 'OVERSEER');
+                    }
+                }
+
                 await delay(3000);
             } else {
                 // ─── ПЕРЕЗАПУСК вместо остановки ───
