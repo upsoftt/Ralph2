@@ -1777,6 +1777,13 @@ def get_dashboard_html():
         body.style.display = isHidden ? 'block' : 'none';
         arrow.style.transform = isHidden ? 'rotate(90deg)' : 'rotate(0deg)';
         localStorage.setItem(key, isHidden ? '0' : '1');
+        // При раскрытии "Выполнено" — прокрутить к последним спринтам
+        if (isHidden && which === 'done') {
+            requestAnimationFrame(() => {
+                const scrollable = document.getElementById('tasksBody');
+                if (scrollable) scrollable.scrollTop = scrollable.scrollHeight;
+            });
+        }
     }
 
     function updateTaskDataSurgically(specs) {

@@ -512,15 +512,36 @@ function extractResult(text) {
     const promiseMatch = source.match(/<promise>(DONE|FAIL)<\/promise>/i);
     if (promiseMatch) {
         const taskIdMatch = source.match(/<task_id>(.*?)<\/task_id>/i);
+        let summary = '';
+        let brief = '';
+
+        // Вариант 1: <summary>...</summary>
         const summaryMatch = source.match(/<summary>([\s\S]*?)(?:<\/summary>|$)/i);
-        let summary = summaryMatch ? summaryMatch[1].trim() : "Описание не найдено.";
-        if (summary.length >= 10 && summary !== '...') {
-            return {
-                status: promiseMatch[1].toUpperCase(),
-                task_id: taskIdMatch ? taskIdMatch[1].trim() : "unknown",
-                summary: summary
-            };
+        if (summaryMatch) summary = summaryMatch[1].trim();
+
+        // Вариант 2: <report>{"summary": "...", ...}</report> (Claude иногда выводит JSON в report)
+        if (!summary || summary.length < 10) {
+            const reportMatch = source.match(/<report>\s*(\{[\s\S]*?\})\s*(?:<\/report>|$)/i);
+            if (reportMatch) {
+                try {
+                    const rj = JSON.parse(reportMatch[1]);
+                    summary = rj.summary || rj.result || '';
+                    brief = rj.brief || '';
+                } catch (e) {
+                    // Не JSON — берём как текст
+                    summary = reportMatch[1].replace(/[{}]/g, '').trim();
+                }
+            }
         }
+
+        if (!summary || summary.length < 10) summary = "Описание не найдено.";
+
+        return {
+            status: promiseMatch[1].toUpperCase(),
+            task_id: taskIdMatch ? taskIdMatch[1].trim() : "unknown",
+            brief: brief,
+            summary: summary
+        };
     }
 
     return null;
@@ -946,54 +967,85 @@ try {
         return null;
     }
 
-    async function auditSprint(sprintNum) {
+    /**
+     * Запускает полноценный аудит спринта.
+     * Возвращает 'OK' | 'FIX' | null
+     */
+    async function auditSprint(sprintNum, attempt = 1) {
         const sprintTitle = getSprintTitle(sprintNum);
-        chatLog(`🔍 Аудит спринта ${sprintNum}: ${sprintTitle}...`, 'OVERSEER');
+        const attemptLabel = attempt > 1 ? ` (повторный аудит #${attempt})` : '';
+        chatLog(`🔍 Аудит спринта ${sprintNum}: ${sprintTitle}${attemptLabel}...`, 'OVERSEER');
 
         const tasks = getSprintTasks(sprintNum);
-        const taskList = tasks.map(t => `  - ${t.id}: ${t.done ? 'DONE' : 'PENDING'}`).join(' | ');
+        const taskList = tasks.map(t => `  ${t.id}: ${t.done ? '✅' : '⬜'}`).join(' | ');
 
-        const auditPrompt = [
-            `Используй скилл /ralph-auditor (вызови через Skill tool) для аудита ТОЛЬКО спринта ${sprintNum} ("${sprintTitle}").`,
-            `Все задачи спринта ${sprintNum} выполнены: ${taskList}.`,
-            `ИНСТРУКЦИИ:`,
-            `1) Прочитай tasks.md и spec-файлы для спринта ${sprintNum} (папки specs/${sprintNum.toString().padStart(3,'0')}-*)`,
-            `2) Проверь РЕАЛИЗАЦИЮ каждой задачи — открой реальный код и проверь соответствие требованиям`,
-            `3) Сверь с PRD.md`,
-            ``,
-            `КРИТИЧЕСКИ ВАЖНО — ВЫБЕРИ РОВНО ОДИН ОТВЕТ:`,
-            ``,
-            `Вариант А) Если реальных проблем НЕТ (код работает, функционал реализован) — выведи ТОЛЬКО слово:`,
-            `RALPH_AUDIT_OK`,
-            `НЕ вызывай /task-architect, НЕ вызывай /ralph-spec-creator, НЕ создавай задач. Просто RALPH_AUDIT_OK.`,
-            ``,
-            `Вариант Б) Если есть РЕАЛЬНЫЕ проблемы (баги, нерабочий код, пропущенный функционал из PRD):`,
-            `- Используй /task-architect чтобы ДОБАВИТЬ задачи-доработки в КОНЕЦ спринта ${sprintNum}`,
-            `- Затем вызови /ralph-spec-creator для генерации спецификаций`,
-            `- После этого выведи ТОЛЬКО слово: RALPH_AUDIT_FIX`,
-            ``,
-            `НЕ ЯВЛЯЮТСЯ проблемами: стиль кода, косметика, "можно сделать лучше", устаревшие комментарии, отсутствие тестов если они не требовались. Выводи RALPH_AUDIT_FIX ТОЛЬКО если ты реально добавил задачи через /task-architect.`
-        ].join(' ');
+        // Собираем список spec-файлов спринта для подсказки аудитору
+        const sprintPrefix = sprintNum.toString().padStart(3, '0');
+        let specFiles = [];
+        try {
+            const dirs = fs.readdirSync(specsDir).filter(d => d.startsWith(sprintPrefix + '-'));
+            for (const d of dirs) {
+                const sf = path.join(specsDir, d, 'spec.md');
+                if (fs.existsSync(sf)) specFiles.push(`specs/${d}/spec.md`);
+            }
+        } catch (e) {}
+
+        const auditPrompt = `АУДИТ СПРИНТА ${sprintNum}${attemptLabel}
+
+Ты — аудитор. Проведи ГЛУБОКИЙ аудит спринта ${sprintNum} ("${sprintTitle}").
+
+ЗАДАЧИ СПРИНТА: ${taskList}
+SPEC-ФАЙЛЫ: ${specFiles.join(', ') || 'не найдены'}
+
+ОБЯЗАТЕЛЬНЫЙ ПОРЯДОК АУДИТА (выполни ВСЕ шаги):
+
+ШАГ 1. Прочитай spec-файл(ы) спринта. Выпиши ВСЕ критерии приёмки для каждой задачи.
+
+ШАГ 2. Для КАЖДОЙ задачи:
+  a) Открой через Read tool РЕАЛЬНЫЙ КОД, который был создан/изменён (не spec, а сам исходник)
+  b) Проверь: реализован ли КАЖДЫЙ пункт из критериев приёмки?
+  c) Проверь: компилируется ли код? (если есть сборка — запусти)
+  d) Проверь: нет ли очевидных багов (необработанные ошибки, race conditions, утечки)?
+
+ШАГ 3. Сверь с PRD.md — реализует ли спринт то, что задумано в продукте.
+
+ШАГ 4. ВЕРДИКТ — выбери РОВНО ОДИН:
+
+ЕСЛИ всё реализовано корректно — выведи ТОЛЬКО:
+RALPH_AUDIT_OK
+
+ЕСЛИ есть РЕАЛЬНЫЕ проблемы (баги, нерабочий код, пропущенные требования):
+  1) Вызови скилл /task-architect (Skill tool) — добавь задачи-доработки в КОНЕЦ спринта ${sprintNum} в tasks.md
+  2) Вызови скилл /ralph-spec-creator (Skill tool) — сгенерируй спецификации
+  3) Выведи ТОЛЬКО: RALPH_AUDIT_FIX
+
+ВАЖНО:
+- НЕ являются проблемами: стиль кода, именование переменных, отсутствие комментариев, "можно лучше"
+- Выводи RALPH_AUDIT_FIX ТОЛЬКО если ты РЕАЛЬНО добавил задачи через /task-architect
+- ОБЯЗАТЕЛЬНО прочитай исходный код каждой задачи, не ограничивайся grep-ом
+- В конце ОБЯЗАТЕЛЬНО выведи одно из двух слов: RALPH_AUDIT_OK или RALPH_AUDIT_FIX`;
 
         logicalBuffer = '';
         jsonlBuffer = '';
         sendCommand(ptyProcess, auditPrompt);
 
-        const auditResult = await waitForModel(extractAuditResult, 600);
+        const auditResult = await waitForModel(extractAuditResult, 900);
 
         if (auditResult === 'FIX') {
-            chatLog(`🔧 Аудит спринта ${sprintNum}: найдены доработки, задачи добавлены.`, 'OVERSEER');
-            return true;
+            chatLog(`🔧 Аудит спринта ${sprintNum}: найдены проблемы, задачи добавлены.`, 'OVERSEER');
+            return 'FIX';
         } else if (auditResult === 'OK') {
             chatLog(`✅ Аудит спринта ${sprintNum}: всё в порядке.`, 'OVERSEER');
-            return false;
+            return 'OK';
         } else {
-            chatLog(`⚠️ Аудит спринта ${sprintNum}: не получен чёткий ответ. Продолжаем.`, 'OVERSEER');
-            return false;
+            chatLog(`⚠️ Аудит спринта ${sprintNum}: не получен ответ (таймаут). Пропускаем.`, 'OVERSEER');
+            return null;
         }
     }
 
-    let lastCompletedSprint = null;
+    // Трекинг аудитов: спринт → количество попыток
+    const sprintAuditAttempts = {};
+    const MAX_AUDIT_ATTEMPTS = 3; // Максимум 3 цикла аудита на спринт
 
     function findNextTask() {
         const walk = (dir) => {
@@ -1157,13 +1209,23 @@ try {
 
                 // ─── АУДИТ СПРИНТА: проверяем границу ───
                 const currentSprint = getSprintNumber(task.id);
-                if (isSprintComplete(currentSprint) && lastCompletedSprint !== currentSprint) {
-                    lastCompletedSprint = currentSprint;
-                    chatLog(`📋 Спринт ${currentSprint} полностью завершён. Запускаю аудит...`, 'OVERSEER');
-                    const hasNewTasks = await auditSprint(currentSprint);
-                    if (hasNewTasks) {
-                        chatLog(`🔄 Аудитор добавил доработки в спринт ${currentSprint}. Выполняю...`, 'OVERSEER');
+                if (isSprintComplete(currentSprint)) {
+                    // Считаем попытки аудита этого спринта
+                    const attempts = sprintAuditAttempts[currentSprint] || 0;
+                    if (attempts < MAX_AUDIT_ATTEMPTS) {
+                        sprintAuditAttempts[currentSprint] = attempts + 1;
+                        chatLog(`📋 Спринт ${currentSprint} завершён. Аудит (попытка ${attempts + 1}/${MAX_AUDIT_ATTEMPTS})...`, 'OVERSEER');
+                        const auditResult = await auditSprint(currentSprint, attempts + 1);
+                        if (auditResult === 'FIX') {
+                            chatLog(`🔄 Аудитор добавил доработки в спринт ${currentSprint}. Выполняю, затем повторный аудит...`, 'OVERSEER');
+                            // НЕ увеличиваем lastCompletedSprint — после выполнения доработок
+                            // isSprintComplete снова сработает и запустит повторный аудит
+                        } else {
+                            // OK или таймаут — спринт закрыт, идём дальше
+                            chatLog(`📦 Спринт ${currentSprint} закрыт.`, 'OVERSEER');
+                        }
                     }
+                    // Если MAX_AUDIT_ATTEMPTS исчерпан — молча продолжаем
                 }
 
                 await delay(3000);
