@@ -48,6 +48,24 @@ function rotateLog(logFile) {
 rotateLog(crashLog);
 rotateLog(liveConsoleLog);
 
+// Бэкап лога предыдущей сессии перед очисткой
+const logsBackupDir = path.join(runnerDir, 'logs_backup');
+try {
+    if (!fs.existsSync(logsBackupDir)) fs.mkdirSync(logsBackupDir, { recursive: true });
+    if (fs.existsSync(liveConsoleLog)) {
+        const stat = fs.statSync(liveConsoleLog);
+        if (stat.size > 100) { // не бэкапить пустые
+            const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            fs.copyFileSync(liveConsoleLog, path.join(logsBackupDir, `session_${ts}.log`));
+            // Удаляем старые бэкапы (оставляем 20 последних)
+            const backups = fs.readdirSync(logsBackupDir).filter(f => f.startsWith('session_')).sort();
+            while (backups.length > 20) {
+                try { fs.unlinkSync(path.join(logsBackupDir, backups.shift())); } catch (e) {}
+            }
+        }
+    }
+} catch (e) {}
+
 fs.writeFileSync(liveConsoleLog, '', 'utf8');
 fs.writeFileSync(thinkingStatusFile, '', 'utf8');
 
@@ -770,7 +788,7 @@ try {
         startJsonlWatcher();
         chatLog('📡 JSONL watcher запущен', 'OVERSEER');
 
-        const initCmd = `ДЕЙСТВУЙ КАК СИСТЕМНЫЙ АГЕНТ. Прочитай файлы PRD.md, ${agent.rulesFile}, planning.md, tasks.md и execution_history.md (если он существует). КРИТИЧЕСКИЕ ПРАВИЛА АВТОНОМНОЙ РАБОТЫ: 1) Ты работаешь ПОЛНОСТЬЮ автономно. НИКОГДА не задавай вопросов, не предлагай варианты на выбор, не жди ответа пользователя. Всегда выбирай решение сам и действуй. 2) Если инструмент не работает (нет прав, ошибка) — используй альтернативу (Bash вместо Write, curl вместо WebFetch и т.д.) без вопросов. 3) Скиллы находятся в D:/MyProjects/skills/ (симлинк из ~/.claude/skills). Для записи скиллов используй путь D:/MyProjects/skills/. 4) Перед тяжёлыми npm/pnpm командами: export NODE_OPTIONS="--max-old-space-size=8192". 5) При любом препятствии — обходи его сам, не останавливайся. Никаких лишних слов. Когда прочитаешь, выведи одно слово: RALPH_READY`;
+        const initCmd = `ДЕЙСТВУЙ КАК СИСТЕМНЫЙ АГЕНТ. Прочитай файлы PRD.md, ${agent.rulesFile}, planning.md, tasks.md и execution_history.md (если он существует). КРИТИЧЕСКИЕ ПРАВИЛА АВТОНОМНОЙ РАБОТЫ: 1) Ты работаешь ПОЛНОСТЬЮ автономно. НИКОГДА не задавай вопросов, не предлагай варианты на выбор, не жди ответа пользователя. Всегда выбирай решение сам и действуй. 2) Если инструмент не работает (нет прав, ошибка) — используй альтернативу (Bash вместо Write, curl вместо WebFetch и т.д.) без вопросов. 3) Скиллы находятся в D:/MyProjects/skills/ (симлинк из ~/.claude/skills). Для записи скиллов используй путь D:/MyProjects/skills/. 4) Перед тяжёлыми npm/pnpm командами: export NODE_OPTIONS="--max-old-space-size=8192". 5) АБСОЛЮТНО ЗАПРЕЩЕНО: git stash, git checkout --, git restore, git reset. Эти команды УНИЧТОЖАЮТ uncommitted код и tasks.md. Если нужно проверить "было ли сломано до моих изменений" — используй git diff или git log, НЕ откатывай код. Для pnpm install используй --no-frozen-lockfile. 6) После каждого выполненного спринта делай git add и git commit с описанием выполненных задач. 7) При любом препятствии — обходи его сам, не останавливайся. Никаких лишних слов. Когда прочитаешь, выведи одно слово: RALPH_READY`;
 
         sendCommand(ptyProcess, initCmd);
         let initRes = await waitForModel(extractInitReady, 900);
@@ -990,40 +1008,25 @@ try {
             }
         } catch (e) {}
 
-        const auditPrompt = `АУДИТ СПРИНТА ${sprintNum}${attemptLabel}
+        const auditPrompt = `Вызови скилл /ralph-auditor (через Skill tool) для аудита спринта ${sprintNum} ("${sprintTitle}").${attemptLabel}
 
-Ты — аудитор. Проведи ГЛУБОКИЙ аудит спринта ${sprintNum} ("${sprintTitle}").
+Контекст для аудитора:
+- ЗАДАЧИ СПРИНТА: ${taskList}
+- SPEC-ФАЙЛЫ: ${specFiles.join(', ') || 'не найдены'}
+- Это пост-имплементационный аудит (код уже написан)
+- Аудитируй ТОЛЬКО спринт ${sprintNum}, не трогай другие
 
-ЗАДАЧИ СПРИНТА: ${taskList}
-SPEC-ФАЙЛЫ: ${specFiles.join(', ') || 'не найдены'}
+КРИТИЧНО — КУДА ДОБАВЛЯТЬ ДОРАБОТКИ:
+Если аудит нашёл проблемы — добавь задачи-доработки В ТОТ ЖЕ спринт ${sprintNum}.
+НЕ создавай новый спринт. Добавь подзадачи с номерами ${sprintNum}.N+1 (где N — последняя существующая подзадача).
+Пример: если последняя задача ${sprintNum}.4, добавь ${sprintNum}.5, ${sprintNum}.6 и т.д.
+Новые задачи должны быть с пометкой [ ] (не выполнены).
+НЕ вызывай /task-architect — добавь задачи напрямую в tasks.md через Edit tool.
+После добавления задач — вызови /ralph-spec-creator для генерации спецификаций.
 
-ОБЯЗАТЕЛЬНЫЙ ПОРЯДОК АУДИТА (выполни ВСЕ шаги):
-
-ШАГ 1. Прочитай spec-файл(ы) спринта. Выпиши ВСЕ критерии приёмки для каждой задачи.
-
-ШАГ 2. Для КАЖДОЙ задачи:
-  a) Открой через Read tool РЕАЛЬНЫЙ КОД, который был создан/изменён (не spec, а сам исходник)
-  b) Проверь: реализован ли КАЖДЫЙ пункт из критериев приёмки?
-  c) Проверь: компилируется ли код? (если есть сборка — запусти)
-  d) Проверь: нет ли очевидных багов (необработанные ошибки, race conditions, утечки)?
-
-ШАГ 3. Сверь с PRD.md — реализует ли спринт то, что задумано в продукте.
-
-ШАГ 4. ВЕРДИКТ — выбери РОВНО ОДИН:
-
-ЕСЛИ всё реализовано корректно — выведи ТОЛЬКО:
-RALPH_AUDIT_OK
-
-ЕСЛИ есть РЕАЛЬНЫЕ проблемы (баги, нерабочий код, пропущенные требования):
-  1) Вызови скилл /task-architect (Skill tool) — добавь задачи-доработки в КОНЕЦ спринта ${sprintNum} в tasks.md
-  2) Вызови скилл /ralph-spec-creator (Skill tool) — сгенерируй спецификации
-  3) Выведи ТОЛЬКО: RALPH_AUDIT_FIX
-
-ВАЖНО:
-- НЕ являются проблемами: стиль кода, именование переменных, отсутствие комментариев, "можно лучше"
-- Выводи RALPH_AUDIT_FIX ТОЛЬКО если ты РЕАЛЬНО добавил задачи через /task-architect
-- ОБЯЗАТЕЛЬНО прочитай исходный код каждой задачи, не ограничивайся grep-ом
-- В конце ОБЯЗАТЕЛЬНО выведи одно из двух слов: RALPH_AUDIT_OK или RALPH_AUDIT_FIX`;
+ПОСЛЕ завершения аудита — выведи РОВНО ОДНО из двух:
+- RALPH_AUDIT_OK — если аудитор не нашёл проблем
+- RALPH_AUDIT_FIX — если аудитор нашёл и добавил задачи-доработки в спринт ${sprintNum}`;
 
         logicalBuffer = '';
         jsonlBuffer = '';
@@ -1203,7 +1206,13 @@ RALPH_AUDIT_OK
                 }
                 if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
                 const taskTitle = task.text.split('\n')[0].replace(/\{\{TASK:[\d.]+\}\}/g, '').trim();
-                const briefLine = result.brief || taskTitle;
+                // Fallback для brief: первое предложение summary без путей к файлам
+                let briefLine = result.brief;
+                if (!briefLine && result.summary) {
+                    briefLine = result.summary.split(/\.\s/)[0].replace(/`[^`]+`/g, '').replace(/\s{2,}/g, ' ').trim();
+                    if (briefLine.length > 150) briefLine = briefLine.slice(0, 147) + '...';
+                }
+                if (!briefLine) briefLine = taskTitle;
                 fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${task.id}: ${taskTitle}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${result.summary}\n\n</details>\n\n---\n\n`, 'utf8');
                 chatLog(`✅ ${task.id}: ${briefLine}`, 'OVERSEER');
 
@@ -1221,8 +1230,16 @@ RALPH_AUDIT_OK
                             // НЕ увеличиваем lastCompletedSprint — после выполнения доработок
                             // isSprintComplete снова сработает и запустит повторный аудит
                         } else {
-                            // OK или таймаут — спринт закрыт, идём дальше
-                            chatLog(`📦 Спринт ${currentSprint} закрыт.`, 'OVERSEER');
+                            // OK или таймаут — спринт закрыт, коммитим
+                            chatLog(`📦 Спринт ${currentSprint} закрыт. Коммитим...`, 'OVERSEER');
+                            try {
+                                const { execSync } = require('child_process');
+                                execSync('git add -A', { cwd: projectDir, timeout: 60000 });
+                                execSync(`git commit -m "Sprint ${currentSprint}: ${sprintTitle}" --no-verify`, { cwd: projectDir, timeout: 60000 });
+                                chatLog(`💾 Коммит спринта ${currentSprint} создан.`, 'OVERSEER');
+                            } catch (commitErr) {
+                                chatLog(`⚠️ Не удалось закоммитить спринт ${currentSprint}: ${commitErr.message?.slice(0, 100)}`, 'OVERSEER');
+                            }
                         }
                     }
                     // Если MAX_AUDIT_ATTEMPTS исчерпан — молча продолжаем

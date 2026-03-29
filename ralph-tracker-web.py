@@ -1153,29 +1153,34 @@ def get_dashboard_html():
     body { background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 0; height: 100vh; overflow: hidden; }
     .container { display: flex; flex-direction: column; height: 100vh; max-width: 100%; }
     .split-view { display: flex; gap: 0; flex: 1; min-height: 0; overflow: hidden; }
-    .col-resizer { width: 12px; min-width: 12px; cursor: col-resize; background: transparent; position: relative; flex-shrink: 0; z-index: 10; transition: background 0.2s; align-self: stretch; margin: 0 -2px; }
+    .col-resizer { width: 12px; min-width: 12px; cursor: col-resize; background: transparent; position: relative; flex-shrink: 0; z-index: 10; transition: background 0.2s; align-self: stretch; margin: 0 -6px; }
+    .col-resizer::before { content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 1px; height: 100%; background: var(--border); }
     .col-resizer::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 4px; height: 40px; background: var(--border); border-radius: 2px; transition: background 0.2s, height 0.2s; }
     .col-resizer:hover { background: rgba(88,166,255,0.08); }
     .col-resizer:hover::after, .col-resizer.dragging::after { background: var(--blue); height: 60px; }
     .col-resizer.dragging { background: rgba(88,166,255,0.12); }
-    .row-resizer { height: 12px; min-height: 12px; cursor: row-resize; background: transparent; position: relative; flex-shrink: 0; z-index: 10; transition: background 0.2s; margin: -2px 0; }
+    .row-resizer { height: 12px; min-height: 12px; cursor: row-resize; background: transparent; position: relative; flex-shrink: 0; z-index: 10; transition: background 0.2s; margin: -6px 0; }
+    .row-resizer::before { content: ''; position: absolute; left: 0; top: 50%; transform: translateY(-50%); height: 1px; width: 100%; background: var(--border); }
     .row-resizer::after { content: ''; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 40px; height: 4px; background: var(--border); border-radius: 2px; transition: background 0.2s, width 0.2s; }
     .row-resizer:hover { background: rgba(88,166,255,0.08); }
     .row-resizer:hover::after, .row-resizer.dragging::after { background: var(--blue); width: 60px; }
     .row-resizer.dragging { background: rgba(88,166,255,0.12); }
-    .col1 { min-width: 180px; flex: 0 0 18%; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+    .col1 { min-width: 180px; flex: 0 0 18%; display: flex; flex-direction: column; overflow: hidden; }
     .col1 .projects-section { flex: 1; overflow-y: auto; padding: 8px; }
-    .col2 { min-width: 200px; flex: 0 0 35%; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+    .col1 .projects-section::-webkit-scrollbar { width: 6px; background: transparent; }
+    .col1 .projects-section::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+    .col1 .projects-section::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+    .col2 { min-width: 200px; flex: 0 0 35%; display: flex; flex-direction: column; overflow: hidden; }
     .col2-header { padding: 10px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
-    .col2-body { flex: 1; overflow-y: auto; padding: 0 8px 8px; min-height: 0; }
+    .col2-body { flex: 1; overflow-y: auto; padding: 0 8px 8px 8px; min-height: 0; margin-right: 6px; }
     .col2-body::-webkit-scrollbar { width: 6px; background: transparent; }
     .col2-body::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
     .col2-body::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
     .col3 { min-width: 200px; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-    .col3-top { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 60px; border-bottom: 1px solid var(--border); }
+    .col3-top { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 60px; }
     .col3-top-header { padding: 8px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; font-weight: 700; color: var(--text-dim); font-size: 0.85em; }
     .col3-top-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
-    .detail-desc-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 40px; border-bottom: 1px solid var(--border); }
+    .detail-desc-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 40px; }
     .detail-result-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 40px; }
     .col3-top-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-dim); font-size: 0.9em; }
     .col3-bottom { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 60px; }
