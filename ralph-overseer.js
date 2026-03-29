@@ -617,12 +617,12 @@ try {
             try {
                 // Отправляем Escape чтобы прервать текущую генерацию
                 ptyProcess.write('\x1b');
-                await delay(1000);
+                await delay(500);
                 // Отправляем /exit чтобы Claude Code завершился корректно
                 ptyProcess.write('/exit\r');
 
-                // Даём Claude Code до 10 секунд на завершение
-                for (let i = 0; i < 10; i++) {
+                // Даём Claude Code до 3 секунд на завершение
+                for (let i = 0; i < 3; i++) {
                     await delay(1000);
                     if (!ptyProcess) break; // Уже завершился через onExit
                 }
@@ -1024,9 +1024,18 @@ try {
 НЕ вызывай /task-architect — добавь задачи напрямую в tasks.md через Edit tool.
 После добавления задач — вызови /ralph-spec-creator для генерации спецификаций.
 
-ПОСЛЕ завершения аудита — выведи РОВНО ОДНО из двух:
-- RALPH_AUDIT_OK — если аудитор не нашёл проблем
-- RALPH_AUDIT_FIX — если аудитор нашёл и добавил задачи-доработки в спринт ${sprintNum}`;
+АБСОЛЮТНОЕ ТРЕБОВАНИЕ — БЕЗ ЭТОГО АУДИТ СЧИТАЕТСЯ ПРОВАЛЕННЫМ:
+После ПОЛНОГО завершения аудита ты ОБЯЗАН вывести РОВНО ОДНО из двух слов-маркеров:
+
+RALPH_AUDIT_OK
+
+или
+
+RALPH_AUDIT_FIX
+
+Это слово должно быть на ОТДЕЛЬНОЙ строке, без дополнительного текста.
+Без этого маркера overseer не сможет определить результат аудита и засчитает таймаут.
+Выведи маркер ПОСЛЕДНИМ сообщением, после всех отчётов и логов.`;
 
         logicalBuffer = '';
         jsonlBuffer = '';
@@ -1086,7 +1095,7 @@ try {
             while (fs.existsSync(pauseFile) && !stopRequested) {
                 chatLog('⏸️ Пауза...', 'OVERSEER');
                 writeStatus(true, { paused: true });
-                await delay(5000);
+                await delay(2000);
                 if (fs.existsSync(stopFile)) { stopRequested = true; break; }
             }
             if (stopRequested) break;
@@ -1231,11 +1240,12 @@ try {
                             // isSprintComplete снова сработает и запустит повторный аудит
                         } else {
                             // OK или таймаут — спринт закрыт, коммитим
+                            const commitTitle = getSprintTitle(currentSprint);
                             chatLog(`📦 Спринт ${currentSprint} закрыт. Коммитим...`, 'OVERSEER');
                             try {
                                 const { execSync } = require('child_process');
                                 execSync('git add -A', { cwd: projectDir, timeout: 60000 });
-                                execSync(`git commit -m "Sprint ${currentSprint}: ${sprintTitle}" --no-verify`, { cwd: projectDir, timeout: 60000 });
+                                execSync(`git commit -m "Sprint ${currentSprint}: ${commitTitle}" --no-verify`, { cwd: projectDir, timeout: 60000 });
                                 chatLog(`💾 Коммит спринта ${currentSprint} создан.`, 'OVERSEER');
                             } catch (commitErr) {
                                 chatLog(`⚠️ Не удалось закоммитить спринт ${currentSprint}: ${commitErr.message?.slice(0, 100)}`, 'OVERSEER');
@@ -1246,6 +1256,9 @@ try {
                 }
 
                 await delay(3000);
+            } else if (stopRequested) {
+                // Стоп запрошен — не перезапускаем, просто выходим
+                break;
             } else {
                 // ─── ПЕРЕЗАПУСК вместо остановки ───
                 totalRestarts++;
