@@ -95,23 +95,20 @@ mkdir "$env:USERPROFILE\.claude" -Force
 
 TrayConsole хранит список проектов в `%LOCALAPPDATA%\TrayConsole\registry.json`.
 
-Создай этот файл:
+**Автоматическая регистрация** — скрипт сканирует `D:\MyProjects\` и находит все проекты с `trayconsole.json`:
 
 ```powershell
-$dir = "$env:LOCALAPPDATA\TrayConsole"
-mkdir $dir -Force
-
-@'
-{
-  "projects": [
-    "D:\\MyProjects\\Ralph2",
-    "D:\\MyProjects\\PortWatcher"
-  ]
-}
-'@ | Out-File -Encoding utf8 "$dir\registry.json"
+cd D:\MyProjects\TrayConsole
+.\register-projects.ps1
 ```
 
-Можешь добавить и другие проекты позже.
+Скрипт:
+- Находит все папки в `D:\MyProjects\` с файлом `trayconsole.json`
+- Создаёт/обновляет `%LOCALAPPDATA%\TrayConsole\registry.json`
+- Не дублирует уже зарегистрированные проекты
+- Пропускает сам TrayConsole
+
+Для предпросмотра без изменений: `.\register-projects.ps1 -DryRun`
 
 ---
 
