@@ -21,7 +21,7 @@
 
 ## Структура проекта
 ```
-D:\MyProjects\Ralph2\
+Ralph2\
 ├── ralph-tracker-web.py       # Веб-сервер + 3-колоночный дашборд (монолит)
 ├── ralph-overseer.js          # Overseer — управление Claude Code через PTY
 ├── agents.js                  # Конфигурация агентов (Claude, Gemini)
