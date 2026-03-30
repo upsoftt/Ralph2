@@ -57,14 +57,14 @@
 - Любой сервис, который слушает на порту, ОБЯЗАН при старте проверить, свободен ли порт, и убить старый процесс по PID если занят.
 - ЗАПРЕЩЕНО стартовать на соседнем порту.
 
-## РЕДАКТИРОВАНИЕ СКИЛЛОВ (КРИТИЧЕСКОЕ)
-- Скиллы физически хранятся в D:\MyProjects\skills\, симлинк ~/.claude/skills используется только для обнаружения.
-- Для ЛЮБОГО редактирования скиллов используй путь D:/MyProjects/skills/<skill-name>/SKILL.md.
+## СКИЛЛЫ
+- Скиллы хранятся в стандартной папке ~/.claude/skills/ (это git-репо: github.com/upsoftt/skills).
+- Редактируй скиллы прямо по пути ~/.claude/skills/<skill-name>/SKILL.md.
 ```
 
 7. **Запуск — проверь что всё работает:**
-   - Запусти TrayConsole: `start D:\MyProjects\TrayConsole\TrayConsole.exe`
-   - Запусти Ralph: `cd D:\MyProjects\Ralph2 && python ralph-tracker-web.py`
+   - Запусти TrayConsole из трея (он автозапускается)
+   - Запусти Ralph: `python ralph-tracker-web.py` (из корня проекта)
    - Проверь что http://localhost:8767 открывается
    - Запусти PortWatcher через TrayConsole (правый клик → PortWatcher → Start)
 
