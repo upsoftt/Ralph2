@@ -43,7 +43,7 @@ function rotateLog(logFile) {
             fs.closeSync(fd);
             fs.writeFileSync(logFile, '[...truncated...]\n' + buf.toString('utf8'), 'utf8');
         }
-    } catch (e) {}
+    } catch (e) { console.error('[error] log_rotation:', e.message); }
 }
 rotateLog(crashLog);
 rotateLog(liveConsoleLog);
@@ -60,11 +60,11 @@ try {
             // Удаляем старые бэкапы (оставляем 20 последних)
             const backups = fs.readdirSync(logsBackupDir).filter(f => f.startsWith('session_')).sort();
             while (backups.length > 20) {
-                try { fs.unlinkSync(path.join(logsBackupDir, backups.shift())); } catch (e) {}
+                try { fs.unlinkSync(path.join(logsBackupDir, backups.shift())); } catch (e) { console.error('[error] backup_cleanup:', e.message); }
             }
         }
     }
-} catch (e) {}
+} catch (e) { console.error('[error] backup_create:', e.message); }
 
 fs.writeFileSync(liveConsoleLog, '', 'utf8');
 fs.writeFileSync(thinkingStatusFile, '', 'utf8');
@@ -81,7 +81,7 @@ function writeStatus(running, extra = {}) {
             heartbeat: new Date().toISOString(),
             ...extra
         }, null, 2), 'utf8');
-    } catch (e) {}
+    } catch (e) { console.error('[error] write_status:', e.message); }
 }
 
 // Уровень 3: Heartbeat — обновляем timestamp каждые 5 секунд
@@ -94,13 +94,13 @@ setInterval(() => {
                 fs.writeFileSync(statusFile, JSON.stringify(data, null, 2), 'utf8');
             }
         }
-    } catch (e) {}
+    } catch (e) { console.error('[error] heartbeat_update:', e.message); }
 }, 5000);
 
 function clearStatus() {
     try {
         fs.writeFileSync(statusFile, JSON.stringify({ running: false, version: 'v4' }), 'utf8');
-    } catch (e) {}
+    } catch (e) { console.error('[error] clear_status:', e.message); }
 }
 
 // Проверяем: не запущен ли уже другой overseer на этом проекте
@@ -118,13 +118,13 @@ if (fs.existsSync(statusFile)) {
                     console.error(`\n❌ Ralph уже запущен на этом проекте (PID ${existing.pid}). Выход.\n`);
                     process.exit(2);
                 }
-            } catch (e) {} // Если tasklist не сработал — считаем что процесс мёртв
+            } catch (e) { console.error('[error] check_process_alive:', e.message); } // Если tasklist не сработал — считаем что процесс мёртв
         }
-    } catch (e) {}
+    } catch (e) { console.error('[error] parse_status:', e.message); }
 }
 
 // Очищаем .ralph-stop если остался от прошлого раза
-if (fs.existsSync(stopFile)) { try { fs.unlinkSync(stopFile); } catch (e) {} }
+if (fs.existsSync(stopFile)) { try { fs.unlinkSync(stopFile); } catch (e) { console.error('[error] cleanup_stop_file:', e.message); } }
 
 // Записываем статус: запущен
 writeStatus(true);
@@ -442,7 +442,7 @@ function chatLog(msg, source = 'SYSTEM') {
     try {
         fs.appendFileSync(liveConsoleLog, formatted + '\n', 'utf8');
         fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [${source}] ${cleanMsg}\n`, 'utf8');
-    } catch (e) {}
+    } catch (e) { console.error('[error] chat_log_write:', e.message); }
 
     renderScreen();
 }
@@ -594,12 +594,12 @@ try {
         stopJsonlWatcher();
         if (ptyProcess) {
             const pid = ptyProcess.pid;
-            try { ptyProcess.kill(); } catch (e) {}
+            try { ptyProcess.kill(); } catch (e) { console.error('[error] kill_pty_process:', e.message); }
             // Убиваем дерево дочерних процессов (MCP серверы, npx и т.д.)
             if (pid) {
                 try {
                     require('child_process').execSync(`taskkill /f /t /pid ${pid}`, { stdio: 'ignore', timeout: 5000 });
-                } catch (e) {} // Процесс мог уже завершиться
+                } catch (e) { console.error('[error] kill_child_tree:', e.message); } // Процесс мог уже завершиться
             }
             ptyProcess = null;
         }
@@ -626,7 +626,7 @@ try {
                     await delay(1000);
                     if (!ptyProcess) break; // Уже завершился через onExit
                 }
-            } catch (e) {}
+            } catch (e) { console.error('[error] graceful_stop:', e.message); }
 
             // Если ещё жив — принудительно убиваем
             killAgent();
@@ -634,7 +634,7 @@ try {
 
         // Убираем файл .ralph-stop
         if (fs.existsSync(stopFile)) {
-            try { fs.unlinkSync(stopFile); } catch (e) {}
+            try { fs.unlinkSync(stopFile); } catch (e) { console.error('[error] cleanup_stop_file:', e.message); }
         }
 
         clearStatus();
@@ -694,7 +694,7 @@ try {
         const spawnTime = Date.now();
         ptyProcess.onData((data) => {
             if (Date.now() - spawnTime < 30000) {
-                try { fs.appendFileSync(crashLog, `[PTY-RAW ${Date.now() - spawnTime}ms] ${data.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '.')}\n`, 'utf8'); } catch(e) {}
+                try { fs.appendFileSync(crashLog, `[PTY-RAW ${Date.now() - spawnTime}ms] ${data.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '.')}\n`, 'utf8'); } catch(e) { console.error('[error] pty_raw_log:', e.message); }
             }
             const clean = superStrip(data);
             const lower = clean.toLowerCase();
@@ -731,7 +731,7 @@ try {
             } else if (lastThinkingTime > 0 && Date.now() - lastThinkingTime > 60000) {
                 currentState = 'IDLE';
                 currentThinkingLine = '';
-                try { fs.writeFileSync(thinkingStatusFile, '', 'utf8'); } catch (e) {}
+                try { fs.writeFileSync(thinkingStatusFile, '', 'utf8'); } catch (e) { console.error('[error] clear_thinking_status:', e.message); }
             }
 
             // PTY буфер — только для ready-детекции при загрузке
@@ -751,11 +751,11 @@ try {
         ptyProcess.onExit(({ exitCode, signal }) => {
             const msg = `⚠️ ${agent.name} PTY завершился (code=${exitCode}, signal=${signal})`;
             chatLog(msg, 'OVERSEER');
-            try { fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [EXIT] ${msg}\n`, 'utf8'); } catch(e) {}
+            try { fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [EXIT] ${msg}\n`, 'utf8'); } catch(e) { console.error('[error] exit_log_write:', e.message); }
             // Убиваем дочерние процессы (MCP серверы), которые остались после крэша
             const pid = ptyProcess ? ptyProcess.pid : null;
             if (pid) {
-                try { require('child_process').execSync(`taskkill /f /t /pid ${pid}`, { stdio: 'ignore', timeout: 5000 }); } catch (e) {}
+                try { require('child_process').execSync(`taskkill /f /t /pid ${pid}`, { stdio: 'ignore', timeout: 5000 }); } catch (e) { console.error('[error] kill_orphan_children:', e.message); }
             }
             stopRequested = true;
             stopJsonlWatcher();
@@ -890,7 +890,7 @@ try {
                     if (pkg.scripts.lint) commands.push({ cmd: 'npm run lint', desc: `linter` });
                     if (pkg.scripts.typecheck) commands.push({ cmd: 'npm run typecheck', desc: `type checking` });
                 }
-            } catch (e) {}
+            } catch (e) { console.error('[error] detect_test_commands:', e.message); }
         }
 
         // Cargo.toml — Rust
@@ -1006,7 +1006,7 @@ try {
                 const sf = path.join(specsDir, d, 'spec.md');
                 if (fs.existsSync(sf)) specFiles.push(`specs/${d}/spec.md`);
             }
-        } catch (e) {}
+        } catch (e) { console.error('[error] read_spec_files:', e.message); }
 
         const auditPrompt = `Вызови скилл /ralph-auditor (через Skill tool) для аудита спринта ${sprintNum} ("${sprintTitle}").${attemptLabel}
 
@@ -1123,7 +1123,7 @@ RALPH_AUDIT_FIX
                                 if (pkg.scripts && pkg.scripts.start) {
                                     launchConfig = { type: 'command', command: 'npm start', cwd: '.', description: 'Запуск через npm start' };
                                 }
-                            } catch (e) {}
+                            } catch (e) { console.error('[error] parse_package_json:', e.message); }
                         } else if (fs.existsSync(path.join(projectDir, 'main.py'))) {
                             launchConfig = { type: 'command', command: 'python main.py', cwd: '.', description: 'Запуск Python' };
                         }
@@ -1157,8 +1157,8 @@ RALPH_AUDIT_FIX
                         refsHint = `\nРЕФЕРЕНСЫ: В папке ${refsRelPath}/ есть визуальные референсы: ${refFiles.join(', ')}. Прочитай их через Read tool для понимания визуального контекста задачи.`;
                     }
                 }
-            } catch (e) {}
-            const prompt = `ВЫПОЛНИ ЗАДАЧУ ${task.id}: ${task.text}\n\nКОНТЕКСТ: Спецификация задачи в файле ${specRelPath}. Прочитай его для полного описания.${refsHint}\n\nПРАВИЛА:\n1) Работай автономно, не задавай вопросов.\n2) Для записи файлов вне проекта используй путь ~/.claude/skills/.\n3) Если Write не работает — используй Bash.\n4) Используй доступные скиллы (Skill tool) если они подходят для задачи — профильные агенты, TDD, debugging, brainstorming и другие.${testHint}\n\nВАЖНО: Сначала ВЫПОЛНИ задачу (напиши код, создай файлы, запусти тесты). Только ПОСЛЕ завершения работы выведи отчёт.\nЕсли ты выведешь отчёт без реальной работы — задача будет назначена повторно.\n\nФормат отчёта:\nRALPH_RESULT\nTASK: ${task.id}\nBRIEF: <1 предложение простым языком: что сделано с точки зрения пользователя, БЕЗ имён файлов/классов/функций>\nSUMMARY: <техническое описание: какие файлы создал/изменил, что конкретно сделал>\nSTATUS: DONE\nRALPH_END`;
+            } catch (e) { console.error('[error] read_reference_images:', e.message); }
+            const prompt = `ВЫПОЛНИ ЗАДАЧУ ${task.id}: ${task.text}\n\nКОНТЕКСТ: Спецификация задачи в файле ${specRelPath}. Прочитай его для полного описания.${refsHint}\n\nПРАВИЛА:\n1) Работай автономно, не задавай вопросов.\n2) Выполни ТОЛЬКО задачу ${task.id} — НЕ переходи к другим задачам. После завершения СРАЗУ выведи отчёт и ОСТАНОВИСЬ.\n3) Для записи файлов вне проекта используй путь ~/.claude/skills/.\n4) Если Write не работает — используй Bash.\n5) Используй доступные скиллы (Skill tool) если они подходят для задачи — профильные агенты, TDD, debugging, brainstorming и другие.${testHint}\n\nВАЖНО: Сначала ВЫПОЛНИ задачу (напиши код, создай файлы, запусти тесты). Только ПОСЛЕ завершения работы выведи отчёт.\nЕсли ты выведешь отчёт без реальной работы — задача будет назначена повторно.\nНЕ выполняй другие задачи. Следующую задачу тебе назначит оркестратор.\n\nФормат отчёта:\nRALPH_RESULT\nTASK: ${task.id}\nBRIEF: <1 предложение простым языком: что сделано с точки зрения пользователя, БЕЗ имён файлов/классов/функций>\nSUMMARY: <техническое описание: какие файлы создал/изменил, что конкретно сделал>\nSTATUS: DONE\nRALPH_END`;
 
             sendCommand(ptyProcess, prompt);
             // Очищаем буферы чтобы шаблон RALPH_RESULT из промпта не попал в парсер
@@ -1191,27 +1191,55 @@ RALPH_AUDIT_FIX
                     summary: result.summary || "Задача выполнена."
                 }, null, 2), 'utf8');
 
-                // Отмечаем в spec.md
-                let specContent = fs.readFileSync(task.file, 'utf8');
-                const lines = specContent.split('\n');
-                for (let i = 0; i < lines.length; i++) {
-                    if (lines[i].includes(`{{TASK:${task.id}}}`) && lines[i].includes('[ ]')) {
-                        lines[i] = lines[i].replace('[ ]', '[x]'); break;
+                // Atomic file write with retry (race condition protection)
+                function safeWriteFile(filePath, updateFn, maxRetries = 3) {
+                    for (let attempt = 0; attempt < maxRetries; attempt++) {
+                        try {
+                            const content = fs.readFileSync(filePath, 'utf8');
+                            const updated = updateFn(content);
+                            if (updated !== null) {
+                                const tmpPath = filePath + '.tmp';
+                                fs.writeFileSync(tmpPath, updated, 'utf8');
+                                fs.renameSync(tmpPath, filePath);
+                            }
+                            return true;
+                        } catch (e) {
+                            if (attempt < maxRetries - 1) {
+                                const delay = 100 * (attempt + 1);
+                                const start = Date.now();
+                                while (Date.now() - start < delay) {} // busy-wait (sync context)
+                            } else {
+                                console.error(`safeWriteFile failed for ${filePath}: ${e.message}`);
+                                return false;
+                            }
+                        }
                     }
                 }
-                fs.writeFileSync(task.file, lines.join('\n'), 'utf8');
+
+                // Отмечаем в spec.md
+                safeWriteFile(task.file, (content) => {
+                    const lines = content.split('\n');
+                    for (let i = 0; i < lines.length; i++) {
+                        if (lines[i].includes(`{{TASK:${task.id}}}`) && lines[i].includes('[ ]')) {
+                            lines[i] = lines[i].replace('[ ]', '[x]');
+                            return lines.join('\n');
+                        }
+                    }
+                    return null; // no change needed
+                });
                 // Отмечаем в tasks.md
                 const tasksFile = path.join(projectDir, 'tasks.md');
                 if (fs.existsSync(tasksFile)) {
-                    try {
-                        const tLines = fs.readFileSync(tasksFile, 'utf8').split('\n');
+                    safeWriteFile(tasksFile, (content) => {
+                        const tLines = content.split('\n');
                         for (let j = 0; j < tLines.length; j++) {
                             if (tLines[j].includes(`{{TASK:${task.id}}}`) && tLines[j].includes('[ ]')) {
-                                tLines[j] = tLines[j].replace('[ ]', '[x]'); break;
+                                tLines[j] = tLines[j].replace('[ ]', '[x]');
+                                return tLines.join('\n');
                             }
                         }
-                        fs.writeFileSync(tasksFile, tLines.join('\n'), 'utf8');
-                    } catch (e) {}
+                        return null;
+                    });
                 }
                 if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
                 const taskTitle = task.text.split('\n')[0].replace(/\{\{TASK:[\d.]+\}\}/g, '').trim();
@@ -1239,7 +1267,40 @@ RALPH_AUDIT_FIX
                             // НЕ увеличиваем lastCompletedSprint — после выполнения доработок
                             // isSprintComplete снова сработает и запустит повторный аудит
                         } else {
-                            // OK или таймаут — спринт закрыт, коммитим
+                            // OK или таймаут — спринт закрыт
+
+                            // ─── СБОР НЕДОСТАЮЩИХ РЕЗУЛЬТАТОВ (пока сессия жива) ───
+                            const sprintTasks = getSprintTasks(currentSprint);
+                            const missingResults = sprintTasks.filter(t => {
+                                const safeId = t.id.replace(/\./g, '_');
+                                const resultPath = path.join(resultsDir, `${safeId}.json`);
+                                return !fs.existsSync(resultPath);
+                            });
+
+                            if (missingResults.length > 0) {
+                                chatLog(`📝 Не хватает результатов для ${missingResults.length} задач спринта ${currentSprint}. Запрашиваю у агента...`, 'OVERSEER');
+                                for (const mt of missingResults) {
+                                    if (stopRequested) break;
+                                    resetJsonlBuffer(); // очистка буфера перед каждым запросом
+                                    chatLog(`📝 Запрашиваю результат задачи ${mt.id}...`, 'OVERSEER');
+                                    sendCommand(ptyProcess, `Ты ранее выполнил задачу ${mt.id}. Напиши краткий отчёт о том, что было сделано. Выведи ТОЛЬКО отчёт в формате:\n\nRALPH_RESULT\nTASK: ${mt.id}\nBRIEF: что сделано с точки зрения пользователя\nSUMMARY: техническое описание\nSTATUS: DONE\nRALPH_END`);
+                                    const missingResult = await waitForModel(extractResult, 120);
+                                    if (missingResult && missingResult.status === 'DONE') {
+                                        const safeId = mt.id.replace(/\./g, '_');
+                                        fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
+                                            status: 'READY',
+                                            task_id: missingResult.task_id || mt.id,
+                                            brief: missingResult.brief || '',
+                                            summary: missingResult.summary || 'Задача выполнена.'
+                                        }, null, 2), 'utf8');
+                                        chatLog(`✅ Результат задачи ${mt.id} получен и сохранён.`, 'OVERSEER');
+                                    } else {
+                                        chatLog(`⚠️ Не удалось получить результат задачи ${mt.id}. Пропускаю.`, 'OVERSEER');
+                                    }
+                                }
+                            }
+
+                            // ─── КОММИТ СПРИНТА (после сбора всех результатов) ───
                             const commitTitle = getSprintTitle(currentSprint);
                             chatLog(`📦 Спринт ${currentSprint} закрыт. Коммитим...`, 'OVERSEER');
                             try {
@@ -1249,6 +1310,15 @@ RALPH_AUDIT_FIX
                                 chatLog(`💾 Коммит спринта ${currentSprint} создан.`, 'OVERSEER');
                             } catch (commitErr) {
                                 chatLog(`⚠️ Не удалось закоммитить спринт ${currentSprint}: ${commitErr.message?.slice(0, 100)}`, 'OVERSEER');
+                            }
+
+                            // ─── ПЕРЕЗАПУСК АГЕНТА ПОСЛЕ СПРИНТА (сброс контекста) ───
+                            chatLog(`🧠 Спринт ${currentSprint} полностью закрыт. Перезапуск Claude Code для сброса контекста...`, 'OVERSEER');
+                            const sprintRestarted = await restartAgent(`сброс контекста после спринта ${currentSprint}`);
+                            if (!sprintRestarted) {
+                                chatLog(`❌ Не удалось перезапустить после спринта ${currentSprint}. Продолжаю в текущей сессии.`, 'OVERSEER');
+                            } else {
+                                chatLog(`✅ Claude Code перезапущен. Продолжаю со свежим контекстом.`, 'OVERSEER');
                             }
                         }
                     }
@@ -1287,7 +1357,7 @@ RALPH_AUDIT_FIX
         }
         process.exit(0);
     }).catch((err) => {
-        try { fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [MAINLOOP] catch: ${err.stack || err}\n`, 'utf8'); } catch(e) {}
+        try { fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [MAINLOOP] catch: ${err.stack || err}\n`, 'utf8'); } catch(e) { console.error('[error] mainloop_crash_log:', e.message); }
         killAgent();
         clearStatus();
         process.exit(1);
