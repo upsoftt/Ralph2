@@ -52,7 +52,7 @@ log_path = Path(__file__).parent / "web_server.log"
 if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
     old_path = log_path.with_suffix('.old')
     try: old_path.unlink(missing_ok=True); log_path.rename(old_path)
-    except: pass
+    except Exception as e: print(f"[error] log_rotation: {e}")
 log_file = open(log_path, "a", encoding="utf-8")
 
 # Подменяем стандартные потоки
@@ -98,7 +98,7 @@ ACTIVE_PROJECT_ID = None
 try:
     if STATE_FILE.exists():
         ACTIVE_PROJECT_ID = json.loads(STATE_FILE.read_text(encoding='utf-8')).get("active_id")
-except: pass
+except Exception as e: print(f"[error] load_active_project: {e}")
 
 BUSY_PROJECTS = {}
 BUSY_STATE_FILE = RALPH_DIR / "busy_state.json"
@@ -109,7 +109,7 @@ def _save_busy_state():
     """Сохраняет BUSY статусы на диск."""
     try:
         BUSY_STATE_FILE.write_text(json.dumps(BUSY_PROJECTS), encoding='utf-8')
-    except: pass
+    except Exception as e: print(f"[error] save_busy_state: {e}")
 
 def _count_tasks_in_file(filepath):
     """Считает (done, total) задачи в секции ## Tasks файла spec.md."""
@@ -129,7 +129,7 @@ def _count_tasks_in_file(filepath):
                         done += 1; total += 1
                     elif stripped.startswith('- [ ]'):
                         total += 1
-    except: pass
+    except Exception as e: print(f"[error] count_tasks: {e}")
     return done, total
 
 def _restore_busy_state():
@@ -139,19 +139,29 @@ def _restore_busy_state():
     if BUSY_STATE_FILE.exists():
         try:
             BUSY_STATE_FILE.unlink()
-        except: pass
+        except Exception as e: print(f"[error] clear_busy_state: {e}")
 
 _restore_busy_state()
+
+import threading as _threading
+_launch_lock = _threading.Lock()
 
 def _save_launch_state():
     """Сохраняет PID запущенных приложений на диск."""
     state = {}
-    for pid, proc in list(LAUNCHED_PROCESSES.items()):
-        if proc.poll() is None:
-            state[pid] = proc.pid
+    with _launch_lock:
+        for pid, proc in list(LAUNCHED_PROCESSES.items()):
+            if isinstance(proc, list):
+                alive_pids = [p.pid for p in proc if p.poll() is None]
+                if alive_pids:
+                    state[pid] = alive_pids
+            else:
+                if proc.poll() is None:
+                    state[pid] = proc.pid
     try:
         LAUNCH_STATE_FILE.write_text(json.dumps(state), encoding='utf-8')
-    except: pass
+    except Exception as e:
+        print(f"[error] _save_launch_state: {e}")
 
 def _restore_launch_state():
     """Восстанавливает информацию о запущенных приложениях после перезапуска сервера."""
@@ -159,10 +169,15 @@ def _restore_launch_state():
         return
     try:
         state = json.loads(LAUNCH_STATE_FILE.read_text(encoding='utf-8'))
-        for project_id, pid in state.items():
-            if _is_process_alive(pid):
-                LAUNCHED_PROCESSES[project_id] = _PidHandle(pid)
-    except: pass
+        for project_id, pid_data in state.items():
+            if isinstance(pid_data, list):
+                alive = [_PidHandle(p) for p in pid_data if _is_process_alive(p)]
+                if alive:
+                    LAUNCHED_PROCESSES[project_id] = alive
+            elif isinstance(pid_data, int) and _is_process_alive(pid_data):
+                LAUNCHED_PROCESSES[project_id] = _PidHandle(pid_data)
+    except Exception as e:
+        print(f"[error] _restore_launch_state: {e}")
 
 class _PidHandle:
     """Обёртка для отслеживания процесса по PID (после перезапуска сервера)."""
@@ -175,7 +190,6 @@ class _PidHandle:
 
 _restore_launch_state()
 import queue as _queue
-import threading as _threading
 _file_lock = _threading.Lock()
 import hashlib as _hashlib
 import socket as _socket
@@ -191,15 +205,14 @@ def _kill_port(port):
     """Убивает процесс, занимающий указанный порт (Windows)."""
     try:
         result = subprocess.run(
-            f'netstat -ano | findstr ":{port} "',
-            shell=True, capture_output=True, text=True, encoding='utf-8', errors='replace'
+            ['netstat', '-ano'],
+            capture_output=True, text=True, encoding='utf-8', errors='replace'
         )
         pids = set()
         for line in result.stdout.strip().split('\n'):
             line = line.strip()
             if not line:
                 continue
-            # Ищем LISTENING или ESTABLISHED на нужном порту
             parts = line.split()
             if len(parts) >= 5:
                 local_addr = parts[1]
@@ -209,7 +222,7 @@ def _kill_port(port):
                         pids.add(pid)
         for pid in pids:
             print(f"[PORT] Убиваю процесс PID {pid} на порту {port}")
-            subprocess.run(f'taskkill /F /T /PID {pid}', shell=True, capture_output=True)
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(pid)], capture_output=True)
     except Exception as e:
         print(f"[PORT] Ошибка при освобождении порта {port}: {e}")
 
@@ -286,7 +299,7 @@ def _load_launch_config(p_path):
                 steps.append({"type": "shell", "command": "npm run dev", "label": "Запуск (dev)"})
             if steps:
                 return {"description": "Node.js приложение", "steps": steps}
-        except: pass
+        except Exception as e: print(f"[error] load_launch_config: {e}")
     if (p_path / "main.py").exists():
         return {"description": "Python приложение", "steps": [{"type": "shell", "command": "python main.py", "label": "Запуск"}]}
     if (p_path / "app.py").exists():
@@ -347,9 +360,10 @@ def _execute_launch(project_id, p_path, launch_config):
                     creationflags=subprocess.CREATE_NEW_CONSOLE
                 )
                 # Храним список процессов (может быть фронт+бэк)
-                if project_id not in LAUNCHED_PROCESSES or not isinstance(LAUNCHED_PROCESSES[project_id], list):
-                    LAUNCHED_PROCESSES[project_id] = []
-                LAUNCHED_PROCESSES[project_id].append(proc)
+                with _launch_lock:
+                    if project_id not in LAUNCHED_PROCESSES or not isinstance(LAUNCHED_PROCESSES[project_id], list):
+                        LAUNCHED_PROCESSES[project_id] = []
+                    LAUNCHED_PROCESSES[project_id].append(proc)
                 _save_launch_state()
 
     _threading.Thread(target=run_steps, daemon=True).start()
@@ -372,7 +386,7 @@ def update_status():
                             sf = os.path.join(root, file)
                             d, t = _count_tasks_in_file(sf)
                             done += d; total += t
-        except: pass
+        except Exception as e: print(f"[error] parse_heartbeat: {e}")
         running = False
         paused = False
         running_version = "v4"
@@ -394,7 +408,7 @@ def update_status():
                             hb_time = datetime.fromisoformat(heartbeat.replace('Z', '+00:00'))
                             now_utc = datetime.now(timezone.utc)
                             heartbeat_stale = (now_utc - hb_time).total_seconds() > 15
-                        except: pass
+                        except Exception as e: print(f"[error] wmic_fallback: {e}")
 
                     if heartbeat_stale:
                         # Heartbeat устарел — процесс точно мёртв
@@ -423,8 +437,8 @@ def update_status():
                             with open(p_stat_file, 'w', encoding='utf-8') as wf:
                                 wf.write(json.dumps({"running": False, "version": "v4"}, indent=2))
                             print(f"[auto-cleanup] Очищен status.json для {proj.get('name', '?')} (PID {target_pid} мёртв)")
-                        except: pass
-            except: pass
+                        except Exception as e: print(f"[error] auto_cleanup_status: {e}")
+            except Exception as e: print(f"[error] read_status_json: {e}")
         # Launch info
         all_done = total > 0 and done == total
         p_path_obj = Path(proj["path"])
@@ -468,13 +482,13 @@ def update_status():
                                                 if tasks[-1]["description"]: tasks[-1]["description"] += " "
                                                 tasks[-1]["description"] += clean_line
                                 spec_details[dirname] = {"tasks": tasks, "completed": sum(1 for t in tasks if t["done"]), "total": len(tasks)}
-                            except: pass
-        except: pass
+                            except Exception as e: print(f"[error] parse_spec_details: {e}")
+        except Exception as e: print(f"[error] read_specs_dir: {e}")
 
     console_visible = False
     try:
         console_visible = (RALPH_DIR / ".ralph-runner" / "console_state").read_text(encoding='utf-8').strip() == "visible"
-    except: pass
+    except Exception as e: print(f"[error] read_console_state: {e}")
 
     return {"projects": status_list, "spec_details": spec_details, "active_id": ACTIVE_PROJECT_ID, "console_visible": console_visible}
 
@@ -524,7 +538,7 @@ class Handler(BaseHTTPRequestHandler):
                         summary = data.get('summary', data.get('result', 'No summary available.'))
                         self.send_json({"success": True, "brief": brief, "summary": summary})
                         return
-                    except: pass
+                    except Exception as e: print(f"[error] read_task_report: {e}")
             self.send_json({"success": False})
         elif p.path == "/api/launch-info":
             qs = parse_qs(p.query)
@@ -547,7 +561,13 @@ class Handler(BaseHTTPRequestHandler):
             all_done = total > 0 and done == total
             launch_config = _load_launch_config(p_path)
             # Check if already running
-            running = pid in LAUNCHED_PROCESSES and LAUNCHED_PROCESSES[pid].poll() is None
+            running = False
+            if pid in LAUNCHED_PROCESSES:
+                procs = LAUNCHED_PROCESSES[pid]
+                if isinstance(procs, list):
+                    running = any(p.poll() is None for p in procs)
+                else:
+                    running = procs.poll() is None
             self.send_json({
                 "available": launch_config is not None,
                 "allDone": all_done,
@@ -567,7 +587,7 @@ class Handler(BaseHTTPRequestHandler):
                             data = json.loads(f.read_text(encoding='utf-8'))
                             t_name = re.sub(r'^- \[[ x]\]\s*', '', data.get('task_name', '')).strip()
                             if data.get('spec_name') == spec: res[t_name] = data
-                        except: pass
+                        except Exception as e: print(f"[error] save_active_project: {e}")
             self.send_json(res)
         else: self.send_error(404)
 
@@ -576,6 +596,9 @@ class Handler(BaseHTTPRequestHandler):
         PROJECTS = load_projects()
         p = urlparse(self.path)
         clen = int(self.headers.get('Content-Length', 0))
+        if clen > 1_000_000:
+            self.send_error(413, "Request body too large")
+            return
         try: body = json.loads(self.rfile.read(clen).decode('utf-8')) if clen > 0 else {}
         except: body = {}
         if p.path == "/api/project":
@@ -583,7 +606,7 @@ class Handler(BaseHTTPRequestHandler):
             if req_id: 
                 ACTIVE_PROJECT_ID = req_id
                 try: STATE_FILE.write_text(json.dumps({"active_id": req_id}), encoding='utf-8')
-                except: pass
+                except Exception as e: print(f"[error] save_active_project: {e}")
             self.send_json({"success": True})
         elif p.path == "/api/start4":
             pid = body.get('project_id')
@@ -603,7 +626,7 @@ class Handler(BaseHTTPRequestHandler):
                     if st.get('running') and st.get('pid') and _is_process_alive(st['pid']):
                         self.send_json({"success": False, "error": f"Ralph уже запущен на этом проекте (PID {st['pid']})"})
                         return
-                except: pass
+                except Exception as e: print(f"[error] check_running_process: {e}")
 
             overseer = RALPH_DIR / "ralph-overseer.js"
             env = os.environ.copy()
@@ -641,7 +664,7 @@ class Handler(BaseHTTPRequestHandler):
                             sd = json.loads(status_file.read_text(encoding='utf-8'))
                             sd['paused'] = False
                             status_file.write_text(json.dumps(sd, indent=2), encoding='utf-8')
-                        except: pass
+                        except Exception as e: print(f"[error] save_project_state: {e}")
                 else:
                     pause_file.write_text("PAUSE", encoding='utf-8')
                     # Обновляем status.json — ставим paused
@@ -650,7 +673,7 @@ class Handler(BaseHTTPRequestHandler):
                             sd = json.loads(status_file.read_text(encoding='utf-8'))
                             sd['paused'] = True
                             status_file.write_text(json.dumps(sd, indent=2), encoding='utf-8')
-                        except: pass
+                        except Exception as e: print(f"[error] read_status_for_pause: {e}")
             self.send_json({"success": True})
         elif p.path == "/api/show-console":
             signal_path = RALPH_DIR / ".ralph-runner" / "console_signal"
@@ -672,12 +695,11 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         data = json.loads(p_stat_file.read_text(encoding='utf-8'))
                         if data.get('pid'):
-                            subprocess.run(f"taskkill /F /PID {data['pid']}", shell=True, capture_output=True)
-                    except: pass
-                
+                            subprocess.run(['taskkill', '/F', '/PID', str(data['pid'])], capture_output=True)
+                    except Exception as e: print(f"[error] restart_kill_old: {e}")
+
                 overseer = RALPH_DIR / "ralph-overseer.js"
                 proj_path = project["path"]
-                cmd_str = f'node "{overseer}" "{proj_path}"'
                 subprocess.Popen(['node', str(overseer), str(proj_path)], creationflags=subprocess.CREATE_NO_WINDOW)
             self.send_json({"success": True})
         elif p.path == "/api/restart-server":
@@ -706,28 +728,29 @@ class Handler(BaseHTTPRequestHandler):
                     lf = r_dir / log_file
                     if lf.exists(): lf.write_text("", encoding='utf-8')
             self.send_json({"success": True})
-        elif p.path == "/api/reset-full":
+        elif p.path == "/api/reset-ralph":
             pid = body.get('project_id')
             proj = next((p for p in PROJECTS if p['id'] == pid), None)
             if proj:
                 p_path = Path(proj['path'])
-                # 1. Сначала делаем обычный сброс прогресса (галочки)
-                self._do_reset_progress(proj)
-                
-                # 2. Теперь удаляем все файлы, кроме системных
-                keep_files = ["prd.md", "gemini.md", "planning.md", "tasks.md", "ralph_history.txt"]
-                keep_dirs = [".ralph-runner", "specs", ".gemini", "node_modules", ".git"]
-                
                 try:
-                    for item in p_path.iterdir():
-                        name_low = item.name.lower()
-                        if item.is_file():
-                            if name_low not in keep_files:
-                                item.unlink()
-                        elif item.is_dir():
-                            if name_low not in keep_dirs:
-                                import shutil
-                                shutil.rmtree(item, ignore_errors=True)
+                    # 1. Сброс прогресса (галочки в spec.md и tasks.md, удаление results)
+                    self._do_reset_progress(proj)
+
+                    # 2. Очистка .ralph-runner/results/ (уже сделано в _do_reset_progress)
+                    # Дополнительно: очистить session_id и busy state
+                    runner_dir = p_path / ".ralph-runner"
+                    if runner_dir.exists():
+                        for f in runner_dir.glob("*.json"):
+                            if f.name == "status.json":
+                                try:
+                                    sd = json.loads(f.read_text(encoding='utf-8'))
+                                    sd['running'] = False
+                                    sd['session_id'] = None
+                                    f.write_text(json.dumps(sd, indent=2), encoding='utf-8')
+                                except Exception as e:
+                                    print(f"[error] reset-ralph status cleanup: {e}")
+
                     self.send_json({"success": True})
                 except Exception as e:
                     self.send_json({"success": False, "error": str(e)})
@@ -768,11 +791,12 @@ class Handler(BaseHTTPRequestHandler):
                                             res_path = Path(proj['path']) / ".ralph-runner" / "results" / f"{tid}.json"
                                             if res_path.exists():
                                                 try: res_path.unlink()
-                                                except: pass
+                                                except Exception as e: print(f"[error] delete_result_file: {e}")
                                     break
                                 curr_idx += 1
                         sf.write_text('\n'.join(lines), encoding='utf-8')
 
+                        # tasks.md тоже пишем ВНУТРИ _file_lock (fix race condition)
                         if task_id_to_toggle:
                             tmd = Path(proj['path']) / "tasks.md"
                             if tmd.exists():
@@ -794,8 +818,11 @@ class Handler(BaseHTTPRequestHandler):
                 BUSY_PROJECTS[pid] = "Generating Specs..."; _save_busy_state()
                 def run_gen():
                     try:
-                        cmd = f'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "{RALPH_DIR / "spec-converter-fixed.ps1"}" -ProjectDir "{proj["path"]}"'
-                        subprocess.run(cmd, shell=True)
+                        subprocess.run([
+                            'powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                            '-File', str(RALPH_DIR / "spec-converter-fixed.ps1"),
+                            '-ProjectDir', str(proj["path"])
+                        ])
                     finally:
                         if pid in BUSY_PROJECTS: del BUSY_PROJECTS[pid]
                         _save_busy_state()
@@ -812,8 +839,8 @@ class Handler(BaseHTTPRequestHandler):
                 procs = LAUNCHED_PROCESSES.pop(pid)
                 if not isinstance(procs, list): procs = [procs]
                 for proc in procs:
-                    try: subprocess.run(f"taskkill /F /T /PID {proc.pid}", shell=True, capture_output=True)
-                    except: pass
+                    try: subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
+                    except Exception as e: print(f"[error] save_task_desc: {e}")
             if pid in BUSY_PROJECTS:
                 del BUSY_PROJECTS[pid]; _save_busy_state()
             _save_launch_state()
@@ -838,7 +865,7 @@ class Handler(BaseHTTPRequestHandler):
                                     else: continue
                                 new_lines.append(l)
                             sf.write_text('\n'.join(new_lines), encoding='utf-8')
-                    except: pass
+                    except Exception as e: print(f"[error] save_task_desc: {e}")
             self.send_json({"success": True})
         elif p.path == "/api/add-subtask":
             pid = body.get('project_id')
@@ -960,7 +987,7 @@ class Handler(BaseHTTPRequestHandler):
                                         if f == 'spec.md':
                                             fp = os.path.join(root, f)
                                             snap[fp] = os.path.getmtime(fp)
-                            except: pass
+                            except Exception as e: print(f"[error] get_spec_snapshot: {e}")
                             return snap
                         before_snap = get_spec_snapshot()
                         # Запускаем ralph-idea.js — мини-overseer с PTY и доступом к скиллам
@@ -994,7 +1021,7 @@ class Handler(BaseHTTPRequestHandler):
                                 if output:
                                     for line in output.strip().split('\n'):
                                         print(f"  {line}")
-                            except: pass
+                            except Exception as e: print(f"[error] read_idea_output: {e}")
                             print(f"[IDEA] ralph-idea.js exit code: {proc.returncode}, processed {count} idea(s)")
                         except Exception as e:
                             print(f"Idea generation error: {e}")
@@ -1080,13 +1107,13 @@ class Handler(BaseHTTPRequestHandler):
                 for proc in procs:
                     if proc.poll() is None:
                         try:
-                            subprocess.run(f"taskkill /F /T /PID {proc.pid}", shell=True, capture_output=True)
-                        except: pass
+                            subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
+                        except Exception as e: print(f"[error] launch_stop_kill: {e}")
                 # Ждём завершения всех процессов (до 5 секунд)
                 for proc in procs:
                     try:
                         proc.wait(timeout=5)
-                    except: pass
+                    except Exception as e: print(f"[error] launch_stop_wait: {e}")
                 del LAUNCHED_PROCESSES[pid]
                 _save_launch_state()
             self.send_json({"success": True})
@@ -1130,7 +1157,7 @@ class Handler(BaseHTTPRequestHandler):
                 s_data = json.loads(status_file.read_text(encoding='utf-8'))
                 if 'session_id' in s_data: s_data['session_id'] = None
                 status_file.write_text(json.dumps(s_data), encoding='utf-8')
-            except: pass
+            except Exception as e: print(f"[error] reset_progress_status: {e}")
     def send_json(self, data):
         try:
             self.send_response(200)
@@ -1233,8 +1260,6 @@ def get_dashboard_html():
     .menu-item.danger { color: var(--red); }
     .menu-item.warning { color: var(--orange); }
     .menu-item.success { color: var(--green); }
-    .card { background: var(--card); border-radius: 10px; padding: 20px; border: 1px solid var(--border); }
-    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; cursor: pointer; }
     .master-task { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 12px; overflow: hidden; transition: 0.3s; }
     .task-group { margin-bottom: 4px; }
     .task-group-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; transition: 0.2s; font-size: 0.85em; background: var(--card); border: 1px solid var(--border); border-radius: 6px; position: sticky; top: -1px; z-index: 5; }
@@ -1380,7 +1405,7 @@ def get_dashboard_html():
     <div class="menu-item warning" onclick="handleMenu(event, 'crash')"><span id="m-icon-crash"></span> Лог ошибок (crash.log)</div>
     <div class="menu-item" onclick="handleMenu(event, 'gen')"><span id="m-icon-gen"></span> Сгенерировать спецификации</div>
     <div class="menu-item warning" onclick="handleMenu(event, 'reset')"><span id="m-icon-reset"></span> Сбросить прогресс</div>
-    <div class="menu-item danger" onclick="handleMenu(event, 'reset-full')"><span id="m-icon-reset-full"></span> Полный сброс (с удалением файлов)</div>
+    <div class="menu-item warning" onclick="handleMenu(event, 'reset-ralph')"><span id="m-icon-reset-full"></span> Сброс Ralph (прогресс + результаты)</div>
     <div class="menu-item danger" onclick="handleMenu(event, 'delete')"><span id="m-icon-trash"></span> Удалить из списка</div>
 </div>
 <script>
@@ -1575,6 +1600,7 @@ def get_dashboard_html():
 
     function getSafeId(s) { return s.replace(/[^a-z0-9]/gi, '_'); }
     function esc(s) { if(!s) return ''; const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
+    function escAttr(s) { if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\/g,'&#92;'); }
     function cleanTaskText(txt) { return txt.replace(/\{\{TASK:[\d.]+\}\}/g, '').trim(); }
     function getTaskNumber(txt) { const m = txt.match(/\{\{TASK:([\d.]+)\}\}/); return m ? m[1] : ''; }
 
@@ -1592,9 +1618,9 @@ def get_dashboard_html():
                     controls = `<span style="display:flex;align-items:center;gap:6px;color:var(--text-dim);font-size:0.75em;" title="${labels[lockAction]||''}">${spinnerHtml} ${labels[lockAction]||''}</span>`;
                 } else if (p.running) {
                     controls = `
-                        <button class="icon-btn stop" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" onclick="event.stopPropagation(); stopRun('${p.id}')" title="Остановить Ralph">${ICONS.stop}</button>
+                        <button class="icon-btn stop" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" onclick="event.stopPropagation(); stopRun('${escAttr(p.id)}')" title="Остановить Ralph">${ICONS.stop}</button>
                         <button class="icon-btn" style="color:var(--blue); border-color:rgba(88,166,255,0.3)" onclick="event.stopPropagation(); showServerLogs()" title="Показать консоль"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg></button>
-                        <button class="icon-btn ${p.paused?'start':'pause'}" style="${p.paused?'color:var(--orange);border-color:var(--orange)':''}" onclick="event.stopPropagation(); togglePause('${p.id}')" title="${p.paused?'Продолжить':'Пауза'}">${p.paused?ICONS.play:ICONS.pause}</button>
+                        <button class="icon-btn ${p.paused?'start':'pause'}" style="${p.paused?'color:var(--orange);border-color:var(--orange)':''}" onclick="event.stopPropagation(); togglePause('${escAttr(p.id)}')" title="${p.paused?'Продолжить':'Пауза'}">${p.paused?ICONS.play:ICONS.pause}</button>
                     `;
                 } else if (p.all_done && p.total > 0) {
                     // Все задачи выполнены — показываем Launch вместо Play
@@ -1603,10 +1629,10 @@ def get_dashboard_html():
                     const m = getModel(p.id);
                     controls = `
                         <div class="model-toggle" onclick="event.stopPropagation()">
-                            <div class="mt-opt ${m==='sonnet'?'active-sonnet':''}" onclick="projectModels['${p.id}']='sonnet'; saveModels(); refresh();" title="Sonnet (быстрая, дешёвая)">Sonnet</div>
-                            <div class="mt-opt ${m==='opus'?'active-opus':''}" onclick="projectModels['${p.id}']='opus'; saveModels(); refresh();" title="Opus 4.6 (самая мощная)">Opus</div>
+                            <div class="mt-opt ${m==='sonnet'?'active-sonnet':''}" onclick="projectModels['${escAttr(p.id)}']='sonnet'; saveModels(); refresh();" title="Sonnet (быстрая, дешёвая)">Sonnet</div>
+                            <div class="mt-opt ${m==='opus'?'active-opus':''}" onclick="projectModels['${escAttr(p.id)}']='opus'; saveModels(); refresh();" title="Opus 4.6 (самая мощная)">Opus</div>
                         </div>
-                        <button class="icon-btn start" title="Запуск Ralph (${m==='opus'?'Opus 4.6':'Sonnet'})" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" ${p.busy?'disabled':''} onclick="event.stopPropagation(); toggleRun4('${p.id}')">${ICONS.play}</button>
+                        <button class="icon-btn start" title="Запуск Ralph (${m==='opus'?'Opus 4.6':'Sonnet'})" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" ${p.busy?'disabled':''} onclick="event.stopPropagation(); toggleRun4('${escAttr(p.id)}')">${ICONS.play}</button>
                     `;
                 }
                 const statusDot = p.running
@@ -1618,10 +1644,10 @@ def get_dashboard_html():
                 if (p.all_done && p.total > 0 && p.launch_available) {
                     const launchTitle = esc(p.launch_description) || 'Запустить приложение';
                     launchBtn = p.launch_running
-                        ? `<button class="launch-btn running" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchStop('${p.id}')" title="${launchTitle}">${ICONS.stop}</button>`
-                        : `<button class="launch-btn" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchProject('${p.id}')" title="${launchTitle}">${ICONS.launch}</button>`;
+                        ? `<button class="launch-btn running" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchStop('${escAttr(p.id)}')" title="${launchTitle}">${ICONS.stop}</button>`
+                        : `<button class="launch-btn" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchProject('${escAttr(p.id)}')" title="${launchTitle}">${ICONS.launch}</button>`;
                 }
-                return `<div class="project-item ${p.active?'active':''}" onclick="setProject('${p.id}')" oncontextmenu="event.preventDefault(); showMenu(event, '${p.id}', ${p.running}, ${!!p.busy}, ${!!p.paused}, ${!!(p.all_done && p.total > 0)})">
+                return `<div class="project-item ${p.active?'active':''}" onclick="setProject('${escAttr(p.id)}')" oncontextmenu="event.preventDefault(); showMenu(event, '${escAttr(p.id)}', ${p.running}, ${!!p.busy}, ${!!p.paused}, ${!!(p.all_done && p.total > 0)})">
                     <div class="project-row1">
                         <div class="project-row1-left">${statusDot}<strong class="project-name-text" title="${esc(p.name)}">${esc(p.name)}</strong>${p.busy ? '<span class="busy-badge" style="font-size:0.7em;padding:1px 7px"><span class="busy-spinner" style="width:10px;height:10px"></span>'+esc(p.busy)+'</span>' : ''}</div>
                         <div class="project-row1-right">${controls}</div>
@@ -1705,26 +1731,26 @@ def get_dashboard_html():
 
     function renderSprintBlock(s, det) {
         const safeS = getSafeId(s);
-        return `<div class="master-task" id="mt-${safeS}" data-spec-name="${s}">
+        return `<div class="master-task" id="mt-${safeS}" data-spec-name="${escAttr(s)}">
             <div class="master-header" onclick="toggleSpec('${safeS}')"><div style="display:flex; align-items:center; gap:10px"><span class="master-status-icon">${det.completed === det.total && det.total > 0 ? ICONS.check : ''}</span><span>${esc(s)}</span></div><div class="spec-right"><div class="spec-progress-bar"><div class="spec-progress-fill" style="width:${det.total ? (det.completed/det.total*100) : 0}%"></div></div><span class="spec-counter">${det.completed}/${det.total}</span></div></div>
             <div id="body-${safeS}" style="display:${_openSpecs.has(safeS) ? 'block' : 'none'}">
                 ${det.tasks.map((t, i) => `<div class="subtask ${t.done?'done':''}" id="st-${safeS}-${i}" data-task-id="${i}">
-                    <div class="subtask-header" onclick="toggleSubtask('${safeS}', ${i}, '${s}', '${t.text.replace(/'/g,"\\'")}')">
+                    <div class="subtask-header" onclick="toggleSubtask('${safeS}', ${i}, '${escAttr(s)}', '${escAttr(t.text)}')">
                         <span class="task-status-icon">${t.done ? ICONS.check : ICONS.square}</span>
                         <span style="font-weight:bold; color:var(--blue); min-width:30px;">${getTaskNumber(t.text)}</span><span>${esc(cleanTaskText(t.text))}</span>
                     </div>
                     <div class="desc-box" id="desc-${safeS}-${i}">
                         <textarea onfocus="isEditing=true" onblur="isEditing=false" oninput="document.getElementById('save-${safeS}-${i}').style.display='block'">${esc(t.description||'')}</textarea>
-                        <button class="save-btn" id="save-${safeS}-${i}" style="display:none" onclick="saveDesc('${s}','${t.text.replace(/'/g,"\\'")}', '${safeS}', ${i})">Сохранить изменения</button>
+                        <button class="save-btn" id="save-${safeS}-${i}" style="display:none" onclick="saveDesc('${escAttr(s)}','${escAttr(t.text)}', '${safeS}', ${i})">Сохранить изменения</button>
                         <div class="res-container" id="res-${safeS}-${i}"></div>
                     </div>
                 </div>`).join('')}
-                <button class="add-subtask-btn" id="add-btn-${safeS}" onclick="showAddSubtask('${safeS}', '${s}')">+ Добавить подзадачу</button>
+                <button class="add-subtask-btn" id="add-btn-${safeS}" onclick="showAddSubtask('${safeS}', '${escAttr(s)}')">+ Добавить подзадачу</button>
                 <div class="add-subtask-form" id="add-form-${safeS}" style="display:none">
                     <input type="text" id="add-title-${safeS}" placeholder="Название подзадачи..." />
                     <textarea id="add-desc-${safeS}" placeholder="Описание (необязательно)..." onfocus="isEditing=true" onblur="isEditing=false"></textarea>
                     <div style="display:flex; gap:8px">
-                        <button class="save-btn" style="display:block" onclick="submitSubtask('${safeS}', '${s}')">Сохранить</button>
+                        <button class="save-btn" style="display:block" onclick="submitSubtask('${safeS}', '${escAttr(s)}')">Сохранить</button>
                         <button class="save-btn" style="display:block; background:var(--bg); color:var(--text-dim); border-color:var(--border)" onclick="hideAddSubtask('${safeS}')">Отмена</button>
                     </div>
                 </div>
@@ -1884,10 +1910,10 @@ def get_dashboard_html():
             });
         }
         else if (type === 'gen') { document.getElementById('ctxMenu').style.display = 'none'; await fetch('/api/generate-specs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:id})}); refresh(); }
-        else if (type === 'reset-full') { 
+        else if (type === 'reset-ralph') {
             document.getElementById('ctxMenu').style.display = 'none';
-            customConfirm(`<div style="color:var(--red);font-weight:bold">ВНИМАНИЕ! ПОЛНЫЙ СБРОС</div>Этот проект будет возвращен к начальному состоянию. <br><br><b>ВСЕ СОЗДАННЫЕ ФАЙЛЫ КОДА БУДУТ УДАЛЕНЫ!</b><br><br>Вы уверены?`, menuX, menuY, async () => {
-                await fetch('/api/reset-full', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:id})});
+            customConfirm(`Сброс Ralph: прогресс (галочки), результаты и логи будут очищены.<br><br>Исходный код проекта <b>не затрагивается</b>.<br><br>Продолжить?`, menuX, menuY, async () => {
+                await fetch('/api/reset-ralph', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:id})});
                 refresh();
             });
         }
@@ -1900,7 +1926,6 @@ def get_dashboard_html():
         }
     }
 
-    function togglePanel(which) { /* deprecated */ }
     function toggleConsole() {
         const wrapper = document.getElementById('consoleWrapper');
         const arrow = document.getElementById('consoleArrow');
@@ -1966,7 +1991,7 @@ def get_dashboard_html():
         detailBody.innerHTML = `
             <div style="position:relative; width:100%; height:100%;">
                 <textarea style="width:100%; height:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); outline:none; resize:none; font-family:inherit; line-height:1.5; font-size:0.9em; padding:10px; padding-bottom:36px; border-radius:6px; box-sizing:border-box;" onfocus="isEditing=true" onblur="isEditing=false" oninput="document.getElementById('detailSaveBtn').style.display='block'" id="detailTextarea">${esc(descText)}</textarea>
-                <button class="save-btn" id="detailSaveBtn" style="display:none; position:absolute; bottom:8px; right:8px; padding:4px 14px; font-size:0.8em; z-index:2;" onclick="saveDescFromDetail('${s}','${text.replace(/'/g,"\\'")}', '${safeS}', ${i})">Сохранить</button>
+                <button class="save-btn" id="detailSaveBtn" style="display:none; position:absolute; bottom:8px; right:8px; padding:4px 14px; font-size:0.8em; z-index:2;" onclick="saveDescFromDetail('${escAttr(s)}','${escAttr(text)}', '${safeS}', ${i})">Сохранить</button>
             </div>`;
         document.getElementById('detailResults').innerHTML = '';
 
@@ -2281,7 +2306,7 @@ if __name__ == "__main__":
             return False
         HANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
         kernel32.SetConsoleCtrlHandler(HANDLER_ROUTINE(_console_handler), True)
-    except: pass
+    except Exception as e: print(f"[error] start_server: {e}")
 
     print(f"🧸 Ralph 2.0 at http://127.0.0.1:{WEB_PORT}")
 
@@ -2303,10 +2328,10 @@ if __name__ == "__main__":
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] Graceful shutdown по команде TrayConsole...")
                 try:
                     server.shutdown()
-                except: pass
+                except Exception as e: print(f"[error] trayconsole_setup: {e}")
                 if _tc:
                     try: _tc.stop()
-                    except: pass
+                    except Exception as e: print(f"[error] trayconsole_setup: {e}")
                 print(f"[{datetime.now().strftime('%H:%M:%S')}] Сервер остановлен.")
                 os._exit(0)
             threading.Thread(target=_do_shutdown, daemon=True).start()
@@ -2326,7 +2351,7 @@ if __name__ == "__main__":
         server.shutdown()
         if _tc:
             try: _tc.stop()
-            except: pass
+            except Exception as e: print(f"[error] trayconsole_action: {e}")
 
 
 
