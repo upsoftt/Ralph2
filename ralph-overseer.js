@@ -18,6 +18,13 @@ const agentName = process.argv[3] || process.env.RALPH_AGENT || 'claude';
 const agent = getAgent(agentName);
 
 const runnerDir = path.join(projectDir, '.ralph-runner');
+
+// Workspace: отдельная папка для Claude Code сессий (изоляция от пользовательских сессий)
+const ralphDir = path.dirname(process.argv[1] || __filename);
+const projectBaseName = path.basename(projectDir);
+const workspaceDir = path.join(ralphDir, 'workspaces', projectBaseName);
+if (!fs.existsSync(workspaceDir)) fs.mkdirSync(workspaceDir, { recursive: true });
+
 const crashLog = path.join(runnerDir, 'crash.log');
 const liveConsoleLog = path.join(runnerDir, 'live_console_4.log');
 const thinkingStatusFile = path.join(runnerDir, 'thinking_status.txt');
@@ -70,9 +77,15 @@ fs.writeFileSync(liveConsoleLog, '', 'utf8');
 fs.writeFileSync(thinkingStatusFile, '', 'utf8');
 
 // --- STATUS TRACKING ---
+function atomicWriteFileSync(filePath, content) {
+    const tmp = filePath + '.tmp';
+    fs.writeFileSync(tmp, content, 'utf8');
+    fs.renameSync(tmp, filePath);
+}
+
 function writeStatus(running, extra = {}) {
     try {
-        fs.writeFileSync(statusFile, JSON.stringify({
+        atomicWriteFileSync(statusFile, JSON.stringify({
             running,
             pid: process.pid,
             version: 'v4',
@@ -80,7 +93,7 @@ function writeStatus(running, extra = {}) {
             started: new Date().toISOString(),
             heartbeat: new Date().toISOString(),
             ...extra
-        }, null, 2), 'utf8');
+        }, null, 2));
     } catch (e) { console.error('[error] write_status:', e.message); }
 }
 
@@ -91,7 +104,7 @@ setInterval(() => {
             const data = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
             if (data.running) {
                 data.heartbeat = new Date().toISOString();
-                fs.writeFileSync(statusFile, JSON.stringify(data, null, 2), 'utf8');
+                atomicWriteFileSync(statusFile, JSON.stringify(data, null, 2));
             }
         }
     } catch (e) { console.error('[error] heartbeat_update:', e.message); }
@@ -99,7 +112,7 @@ setInterval(() => {
 
 function clearStatus() {
     try {
-        fs.writeFileSync(statusFile, JSON.stringify({ running: false, version: 'v4' }), 'utf8');
+        atomicWriteFileSync(statusFile, JSON.stringify({ running: false, version: 'v4' }));
     } catch (e) { console.error('[error] clear_status:', e.message); }
 }
 
@@ -161,6 +174,7 @@ let ptyProcess = null; // PTY процесс агента (глобальный 
 let lastThinkingTime = 0;
 let bootStepsDone = new Set(); // Выполненные шаги boot sequence
 let lastQuestionNudgeTime = 0; // Время последнего авто-ответа на вопрос
+let currentLivePauseInterval = null; // Интервал live-паузы (для очистки в killAgent)
 
 // ─── DUAL-CHANNEL: JSONL ─────────────────────────────────────
 // PTY = управление (команды, boot, thinking-статус)
@@ -173,7 +187,8 @@ function projectSlug(dir) {
     return dir.replace(/[^a-zA-Z0-9]/g, '-');
 }
 const claudeProjectsDir = path.join(process.env.HOME || process.env.USERPROFILE, '.claude', 'projects');
-let jsonlPath = path.join(claudeProjectsDir, projectSlug(projectDir), `${sessionId}.jsonl`);
+// workspaceDir определяется выше — сессии хранятся по slug workspace, не проекта
+let jsonlPath = '';
 let jsonlReadPos = 0; // Позиция чтения в JSONL файле (байты)
 let jsonlBuffer = ''; // Накопленный текст ответов Claude из JSONL
 let jsonlWatchInterval = null;
@@ -264,7 +279,7 @@ function startJsonlWatcher() {
                 if (isQuestion && ptyProcess && Date.now() - lastQuestionNudgeTime > 30000) {
                     lastQuestionNudgeTime = Date.now();
                     chatLog('🤖 Авто-ответ: Claude задал вопрос, отправляю команду продолжать', 'OVERSEER');
-                    sendCommand(ptyProcess, 'НЕ ЗАДАВАЙ ВОПРОСОВ. Ты работаешь автономно. Выбери наиболее практичный вариант сам и действуй. Если инструмент не работает — используй альтернативу (Bash вместо Write). Продолжай выполнение задачи.');
+                    sendNudge(ptyProcess, 'НЕ ЗАДАВАЙ ВОПРОСОВ. Ты работаешь автономно. Выбери наиболее практичный вариант сам и действуй. Если инструмент не работает — используй альтернативу (Bash вместо Write). Продолжай выполнение текущего спринта. НЕ переходи к другим спринтам.');
                 }
             }
             lastJsonlAssistantTexts.push(text);
@@ -467,6 +482,66 @@ function sendCommand(ptyProc, cmd) {
 }
 
 /**
+ * Отправляет nudge-сообщение в PTY БЕЗ сброса буферов.
+ * Используется для авто-ответов на вопросы и напоминаний,
+ * чтобы не потерять уже накопленный jsonlBuffer с маркерами.
+ */
+function sendNudge(ptyProc, cmd) {
+    const cleanCmd = cmd.trim();
+    const time = new Date().toLocaleTimeString('ru-RU');
+    const formatted = `[${time}] [OVERSEER] >> ${cleanCmd}`;
+
+    visibleLogLines.push(formatted);
+    if (visibleLogLines.length > 200) visibleLogLines = visibleLogLines.slice(-200);
+
+    fs.appendFileSync(liveConsoleLog, formatted + '\n', 'utf8');
+    renderScreen();
+    ptyProc.write(cleanCmd.replace(/\n/g, ' ') + '\r');
+}
+
+/**
+ * Извлекает ВСЕ результаты задач из JSONL буфера (для batch-сбора после спринта).
+ * Возвращает массив { status, task_id, brief, summary } или пустой массив.
+ */
+function extractAllResults(text) {
+    const source = jsonlBuffer || text;
+    const cleaned = source
+        .replace(/\*\*/g, '')
+        .replace(/[║╔╗╚╝═╠╣╬╦╩─│┌┐└┘├┤┬┴┼▐▌▀▄█░▒▓]/g, '')
+        .replace(/^ +| +$/gm, '');
+
+    const results = [];
+    // Ищем ВСЕ блоки RALPH_RESULT...RALPH_END
+    const blockRegex = /RALPH_RESULT[\s\S]*?RALPH_END/g;
+    let match;
+    while ((match = blockRegex.exec(cleaned)) !== null) {
+        const block = match[0];
+        const taskMatch = block.match(/TASK:\s*(.+)/i);
+        const briefMatch = block.match(/BRIEF:\s*(.*?)(?=\n|SUMMARY:|STATUS:|RALPH_END)/i);
+        const summaryMatch = block.match(/SUMMARY:\s*([\s\S]*?)(?=STATUS:|RALPH_END)/i);
+        const statusMatch = block.match(/STATUS:\s*(DONE|FAIL)/i);
+        if (statusMatch) {
+            let summary = summaryMatch ? summaryMatch[1].trim() : '';
+            summary = summary.replace(/\n{2,}/g, '\n').replace(/^\s*\n/gm, '').trim();
+            // Защита от копирования шаблона промпта без реальной работы
+            const placeholders = ['здесь напиши', 'что конкретно сделал', 'опиши что сделал', '<ЗАПОЛНИ', 'описание того, что ты сделал', 'техническое описание (какие файлы', 'что сделано с точки зрения пользователя (1 предложение'];
+            const brief = briefMatch ? briefMatch[1].trim() : '';
+            const allText = (brief + ' ' + summary).toLowerCase();
+            const isPlaceholder = placeholders.some(ph => allText.includes(ph.toLowerCase()));
+            if (isPlaceholder) continue; // Пропускаем шаблон, ждём реальный отчёт
+            if (summary.length < 10) summary = 'Задача выполнена.';
+            results.push({
+                status: statusMatch[1].toUpperCase(),
+                task_id: taskMatch ? taskMatch[1].trim() : 'unknown',
+                brief: brief,
+                summary: summary
+            });
+        }
+    }
+    return results;
+}
+
+/**
  * Извлекает результат задачи из JSONL буфера (чистый текст, без PTY-мусора)
  */
 function extractResult(text) {
@@ -592,6 +667,7 @@ try {
      */
     function killAgent() {
         stopJsonlWatcher();
+        if (currentLivePauseInterval) { clearInterval(currentLivePauseInterval); currentLivePauseInterval = null; }
         if (ptyProcess) {
             const pid = ptyProcess.pid;
             try { ptyProcess.kill(); } catch (e) { console.error('[error] kill_pty_process:', e.message); }
@@ -644,15 +720,32 @@ try {
     /**
      * Спавнит новый PTY процесс агента
      */
-    function spawnAgent() {
-        // Новый session ID для каждого запуска
-        sessionId = crypto.randomUUID();
-        jsonlPath = path.join(claudeProjectsDir, projectSlug(projectDir), `${sessionId}.jsonl`);
+    function spawnAgent(resumeSessionId = null) {
+        // Resume existing session or create new
+        if (resumeSessionId) {
+            sessionId = resumeSessionId;
+            chatLog(`🔄 Resume session: ${sessionId}`, 'OVERSEER');
+        } else {
+            sessionId = crypto.randomUUID();
+        }
+        jsonlPath = path.join(claudeProjectsDir, projectSlug(workspaceDir), `${sessionId}.jsonl`);
+        // При resume — читаем с конца существующего JSONL
         jsonlReadPos = 0;
+        if (resumeSessionId && fs.existsSync(jsonlPath)) {
+            jsonlReadPos = fs.statSync(jsonlPath).size;
+        }
 
-        const ptyArgs = [...agent.args, '--session-id', sessionId];
-        chatLog(`📋 Session ID: ${sessionId}`, 'OVERSEER');
+        const ptyArgs = resumeSessionId
+            ? [...agent.args.filter(a => a !== '--session-id'), '--resume', sessionId]
+            : [...agent.args, '--session-id', sessionId];
+        chatLog(`📋 Session ID: ${sessionId}${resumeSessionId ? ' (resume)' : ''}`, 'OVERSEER');
         chatLog(`📂 JSONL: ${jsonlPath}`, 'OVERSEER');
+
+        // Track Ralph sessions for the collect-results dialog
+        try {
+            const sessFile = path.join(runnerDir, 'ralph_sessions.txt');
+            fs.appendFileSync(sessFile, `${sessionId}\t${new Date().toISOString()}\n`, 'utf8');
+        } catch (e) { console.error('[error] track_session:', e.message); }
 
         // Сброс состояния
         logicalBuffer = '';
@@ -662,15 +755,22 @@ try {
         stopRequested = false;
         resetJsonlBuffer();
 
+        // Workspace CLAUDE.md: направляет Claude к файлам проекта
+        const wsClaude = path.join(workspaceDir, 'CLAUDE.md');
+        if (!fs.existsSync(wsClaude)) {
+            fs.writeFileSync(wsClaude, `# Ralph Workspace\n\nПроект расположен в: ${projectDir}\nВсе файлы проекта находятся по абсолютным путям в этой директории.\nРаботай с файлами проекта используя абсолютные пути.\n`, 'utf8');
+        }
+
         ptyProcess = pty.spawn(agent.command, ptyArgs, {
             name: 'xterm-color',
             ...agent.pty,
-            cwd: projectDir,
+            cwd: workspaceDir,
             env: { ...process.env, RALPH_NODE_HEAP: '8192', ...agent.env },
         });
 
         // ─── LIVE PAUSE: замораживает Claude Code mid-task через PTY pause ───
         let livePaused = false;
+        if (currentLivePauseInterval) { clearInterval(currentLivePauseInterval); currentLivePauseInterval = null; }
         const livePauseInterval = setInterval(() => {
             if (!ptyProcess) return;
             const shouldPause = fs.existsSync(pauseFile);
@@ -686,9 +786,10 @@ try {
                 chatLog('▶️ Продолжение (процесс разморожен)', 'OVERSEER');
             }
         }, 1000);
+        currentLivePauseInterval = livePauseInterval;
 
         // Очистка интервала при завершении
-        ptyProcess.onExit(() => { clearInterval(livePauseInterval); });
+        ptyProcess.onExit(() => { clearInterval(livePauseInterval); currentLivePauseInterval = null; });
 
         // Диагностика: логируем ВЕСЬ сырой PTY вывод в crash.log первые 30 секунд
         const spawnTime = Date.now();
@@ -708,7 +809,7 @@ try {
                         bootStepsDone.add(i);
                         chatLog(`🔄 Boot: ${step.desc}`, 'OVERSEER');
                         setTimeout(() => {
-                            ptyProcess.write(step.send);
+                            if (ptyProcess) ptyProcess.write(step.send);
                         }, step.delay || 500);
                         break;
                     }
@@ -748,14 +849,14 @@ try {
             }
         });
 
+        const thisPtyPid = ptyProcess.pid; // capture pid before potential nullification
         ptyProcess.onExit(({ exitCode, signal }) => {
             const msg = `⚠️ ${agent.name} PTY завершился (code=${exitCode}, signal=${signal})`;
             chatLog(msg, 'OVERSEER');
             try { fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [EXIT] ${msg}\n`, 'utf8'); } catch(e) { console.error('[error] exit_log_write:', e.message); }
             // Убиваем дочерние процессы (MCP серверы), которые остались после крэша
-            const pid = ptyProcess ? ptyProcess.pid : null;
-            if (pid) {
-                try { require('child_process').execSync(`taskkill /f /t /pid ${pid}`, { stdio: 'ignore', timeout: 5000 }); } catch (e) { console.error('[error] kill_orphan_children:', e.message); }
+            if (thisPtyPid) {
+                try { require('child_process').execSync(`taskkill /f /t /pid ${thisPtyPid}`, { stdio: 'ignore', timeout: 5000 }); } catch (e) { console.error('[error] kill_orphan_children:', e.message); }
             }
             stopRequested = true;
             stopJsonlWatcher();
@@ -768,7 +869,7 @@ try {
      * Ожидает загрузку агента и отправляет init-команду
      * Возвращает true если инициализация прошла успешно
      */
-    async function bootAndInit() {
+    async function bootAndInit(isResume = false) {
         chatLog(`⏳ Ожидание загрузки ${agent.name}...`, 'OVERSEER');
         let initialReady = false;
         for (let i = 0; i < 120; i++) {
@@ -788,6 +889,16 @@ try {
         startJsonlWatcher();
         chatLog('📡 JSONL watcher запущен', 'OVERSEER');
 
+        // При resume пропускаем инициализацию — сессия уже знает контекст
+        if (isResume) {
+            chatLog("✅ Сессия возобновлена (resume), пропускаем инициализацию.", "OVERSEER");
+            await delay(3000);
+            logicalBuffer = '';
+            // Nudge: напомнить Claude продолжать работу
+            sendNudge(ptyProcess, 'Ты был прерван. Продолжай выполнение текущего спринта. Если уже всё завершил — выведи RALPH_SPRINT_DONE на отдельной строке.');
+            return true;
+        }
+
         const initCmd = `ДЕЙСТВУЙ КАК СИСТЕМНЫЙ АГЕНТ. Прочитай файлы PRD.md, ${agent.rulesFile}, planning.md, tasks.md и execution_history.md (если он существует). КРИТИЧЕСКИЕ ПРАВИЛА АВТОНОМНОЙ РАБОТЫ: 1) Ты работаешь ПОЛНОСТЬЮ автономно. НИКОГДА не задавай вопросов, не предлагай варианты на выбор, не жди ответа пользователя. Всегда выбирай решение сам и действуй. 2) Если инструмент не работает (нет прав, ошибка) — используй альтернативу (Bash вместо Write, curl вместо WebFetch и т.д.) без вопросов. 3) Скиллы находятся в D:/MyProjects/skills/ (симлинк из ~/.claude/skills). Для записи скиллов используй путь D:/MyProjects/skills/. 4) Перед тяжёлыми npm/pnpm командами: export NODE_OPTIONS="--max-old-space-size=8192". 5) АБСОЛЮТНО ЗАПРЕЩЕНО: git stash, git checkout --, git restore, git reset. Эти команды УНИЧТОЖАЮТ uncommitted код и tasks.md. Если нужно проверить "было ли сломано до моих изменений" — используй git diff или git log, НЕ откатывай код. Для pnpm install используй --no-frozen-lockfile. 6) После каждого выполненного спринта делай git add и git commit с описанием выполненных задач. 7) При любом препятствии — обходи его сам, не останавливайся. Никаких лишних слов. Когда прочитаешь, выведи одно слово: RALPH_READY`;
 
         sendCommand(ptyProcess, initCmd);
@@ -803,7 +914,7 @@ try {
                 continue;
             }
             chatLog(`⚠️ ${agent.name} не ответил RALPH_READY. Повторяю запрос (попытка ${initRetries}/${MAX_INIT_RETRIES})...`, "OVERSEER");
-            sendCommand(ptyProcess, "Ты закончил? Выведи одно слово: RALPH_READY");
+            sendNudge(ptyProcess, "Ты закончил? Выведи одно слово: RALPH_READY");
             initRes = await waitForModel(extractInitReady, 300);
         }
         if (stopRequested) { chatLog("❌ PTY завершился до загрузки контекста.", "OVERSEER"); return false; }
@@ -819,19 +930,19 @@ try {
      * Перезапуск агента: kill → spawn → boot → init
      * Возвращает true если перезапуск успешен
      */
-    async function restartAgent(reason) {
+    async function restartAgent(reason, resumeSessionId = null) {
         chatLog(`🔄 Перезапуск ${agent.name}: ${reason}`, 'OVERSEER');
         killAgent();
         await delay(3000);
-        spawnAgent();
-        return await bootAndInit();
+        spawnAgent(resumeSessionId);
+        return await bootAndInit(!!resumeSessionId);
     }
 
     async function waitForModel(conditionFn, timeoutSec = 1800) {
         const start = Date.now();
         await delay(2000);
 
-        const FORMAT_ERROR_SILENCE_SEC = 300;
+        const FORMAT_ERROR_SILENCE_SEC = 600;
         let lastDataTime = Date.now();
         let lastJsonlLen = 0;
 
@@ -980,8 +1091,9 @@ try {
 
     function extractAuditResult(text) {
         const source = jsonlBuffer || text;
-        if (source.includes('RALPH_AUDIT_OK')) return 'OK';
-        if (source.includes('RALPH_AUDIT_FIX')) return 'FIX';
+        // Строгая проверка: маркер на отдельной строке
+        if (/^RALPH_AUDIT_OK\s*$/m.test(source)) return 'OK';
+        if (/^RALPH_AUDIT_FIX\s*$/m.test(source)) return 'FIX';
         return null;
     }
 
@@ -1079,13 +1191,183 @@ RALPH_AUDIT_FIX
         return null;
     }
 
+    // ─── SPRINT-BATCH MODE ─────────────────────────────────────
+
+    /**
+     * Находит следующий невыполненный спринт.
+     * Возвращает { sprintNum, tasks, title, undoneTasks } или null
+     */
+    function findNextSprint() {
+        const task = findNextTask();
+        if (!task) return null;
+
+        const sprintNum = getSprintNumber(task.id);
+        const tasks = getSprintTasks(sprintNum);
+        const title = getSprintTitle(sprintNum);
+        const undoneTasks = tasks.filter(t => !t.done);
+
+        return { sprintNum, tasks, title, undoneTasks };
+    }
+
+    /**
+     * Создаёт файл current_sprint.md с задачами текущего спринта.
+     */
+    function createCurrentSprintFile(sprintNum) {
+        const title = getSprintTitle(sprintNum);
+        const tasksFile = path.join(projectDir, 'tasks.md');
+
+        let sprintSection = '';
+        if (fs.existsSync(tasksFile)) {
+            const content = fs.readFileSync(tasksFile, 'utf8');
+            const sprintRegex = new RegExp(
+                `(##\\s*(?:Sprint|Спринт)\\s*${sprintNum}[:\\s][\\s\\S]*?)(?=\\n##\\s*(?:Sprint|Спринт)|$)`,
+                'i'
+            );
+            const match = content.match(sprintRegex);
+            if (match) sprintSection = match[1].trim();
+        }
+
+        // Find spec file
+        const sprintPrefix = sprintNum.toString().padStart(3, '0');
+        let specPath = '';
+        try {
+            const dirs = fs.readdirSync(specsDir).filter(d => d.startsWith(sprintPrefix + '-'));
+            if (dirs.length > 0) {
+                const sf = path.join(specsDir, dirs[0], 'spec.md');
+                if (fs.existsSync(sf)) specPath = `specs/${dirs[0]}/spec.md`;
+            }
+        } catch (e) {}
+
+        let fileContent = `# Спринт ${sprintNum}: ${title}\n\n`;
+        if (sprintSection) {
+            fileContent += `${sprintSection}\n\n`;
+        }
+        if (specPath) {
+            fileContent += `## Спецификация\n\nПодробное описание задач: ${specPath}\n`;
+        }
+
+        const filePath = path.join(projectDir, 'current_sprint.md');
+        fs.writeFileSync(filePath, fileContent, 'utf8');
+        return filePath;
+    }
+
+    /**
+     * Отмечает задачу как выполненную в spec.md и tasks.md
+     */
+    function markTaskDone(task) {
+        // Atomic file write with retry
+        function safeWriteFile(filePath, updateFn, maxRetries = 3) {
+            for (let attempt = 0; attempt < maxRetries; attempt++) {
+                try {
+                    const content = fs.readFileSync(filePath, 'utf8');
+                    const updated = updateFn(content);
+                    if (updated !== null) {
+                        const tmpPath = filePath + '.tmp';
+                        fs.writeFileSync(tmpPath, updated, 'utf8');
+                        fs.renameSync(tmpPath, filePath);
+                    }
+                    return true;
+                } catch (e) {
+                    if (attempt < maxRetries - 1) {
+                        const d = 100 * (attempt + 1);
+                        // Non-busy sleep: yields event loop unlike while(Date.now())
+                        const sab = new SharedArrayBuffer(4);
+                        Atomics.wait(new Int32Array(sab), 0, 0, d);
+                    } else {
+                        console.error(`safeWriteFile failed for ${filePath}: ${e.message}`);
+                        return false;
+                    }
+                }
+            }
+        }
+
+        const markFn = (content) => {
+            const lines = content.split('\n');
+            for (let i = 0; i < lines.length; i++) {
+                if (lines[i].includes(`{{TASK:${task.id}}}`) && lines[i].includes('[ ]')) {
+                    lines[i] = lines[i].replace('[ ]', '[x]');
+                    return lines.join('\n');
+                }
+            }
+            return null;
+        };
+
+        // Mark in spec.md
+        if (task.file) safeWriteFile(task.file, markFn);
+
+        // Mark in tasks.md
+        const tasksFile = path.join(projectDir, 'tasks.md');
+        if (fs.existsSync(tasksFile)) safeWriteFile(tasksFile, markFn);
+    }
+
+    /**
+     * Детектор завершения спринта
+     */
+    function extractSprintDone(text) {
+        const source = jsonlBuffer || text;
+        // Строгая проверка: маркер на отдельной строке (не внутри цитаты промпта)
+        if (/^RALPH_SPRINT_DONE\s*$/m.test(source)) return 'DONE';
+        return null;
+    }
+
+    // ─── SPRINT SESSION TRACKING ───────────────────────────────
+    const sprintSessionsFile = path.join(runnerDir, 'sprint_sessions.json');
+
+    function loadSprintSessions() {
+        try {
+            if (fs.existsSync(sprintSessionsFile)) {
+                return JSON.parse(fs.readFileSync(sprintSessionsFile, 'utf8'));
+            }
+        } catch (e) { console.error('[error] load_sprint_sessions:', e.message); }
+        return {};
+    }
+
+    function saveSprintSession(sprintNum, sid) {
+        const sessions = loadSprintSessions();
+        sessions[sprintNum] = { sessionId: sid, updatedAt: new Date().toISOString() };
+        // Atomic write: tmp + rename для защиты от прерывания записи
+        const tmpFile = sprintSessionsFile + '.tmp';
+        fs.writeFileSync(tmpFile, JSON.stringify(sessions, null, 2), 'utf8');
+        fs.renameSync(tmpFile, sprintSessionsFile);
+    }
+
+    function getSprintSessionId(sprintNum) {
+        const sessions = loadSprintSessions();
+        return sessions[sprintNum]?.sessionId || null;
+    }
+
+    function clearSprintSession(sprintNum) {
+        const sessions = loadSprintSessions();
+        delete sessions[sprintNum];
+        const tmpFile = sprintSessionsFile + '.tmp';
+        fs.writeFileSync(tmpFile, JSON.stringify(sessions, null, 2), 'utf8');
+        fs.renameSync(tmpFile, sprintSessionsFile);
+    }
+
     const MAX_RESTARTS = 5;
-    let totalRestarts = 0;
+    let sprintRestarts = 0;
+    let lastSprintNum = null;
 
     async function mainLoop() {
-        // Первый запуск
-        spawnAgent();
-        const bootOk = await bootAndInit();
+        // ─── Проверяем: есть ли незавершённый спринт с сохранённой сессией ───
+        const firstSprint = findNextSprint();
+        let resumeSid = null;
+        if (firstSprint) {
+            resumeSid = getSprintSessionId(firstSprint.sprintNum);
+            if (resumeSid) {
+                // Проверяем что JSONL существует
+                const testJsonl = path.join(claudeProjectsDir, projectSlug(workspaceDir), `${resumeSid}.jsonl`);
+                if (!fs.existsSync(testJsonl)) {
+                    chatLog(`⚠️ JSONL для сессии ${resumeSid} не найден. Начинаю новую сессию.`, 'OVERSEER');
+                    resumeSid = null;
+                    clearSprintSession(firstSprint.sprintNum);
+                }
+            }
+        }
+
+        // Первый запуск (или resume)
+        spawnAgent(resumeSid);
+        const bootOk = await bootAndInit(!!resumeSid);
         if (!bootOk) return;
 
         while (!stopRequested) {
@@ -1101,8 +1383,9 @@ RALPH_AUDIT_FIX
             if (stopRequested) break;
             writeStatus(true, { paused: false });
 
-            const task = findNextTask();
-            if (!task) {
+            // ─── НАЙТИ СЛЕДУЮЩИЙ СПРИНТ ───
+            const sprint = findNextSprint();
+            if (!sprint) {
                 chatLog("🎉 ПРОЕКТ ВЫПОЛНЕН!", 'OVERSEER');
 
                 // Генерация launch.json если его нет
@@ -1139,213 +1422,266 @@ RALPH_AUDIT_FIX
                 break;
             }
 
-            chatLog(`🚀 Задача ${task.id}: ${task.text.split('\n')[0]}`, 'OVERSEER');
+            const { sprintNum, tasks: sprintTasks, title: sprintTitle, undoneTasks } = sprint;
+
+            // Сброс счётчика перезапусков при переходе на новый спринт
+            if (lastSprintNum !== sprintNum) {
+                sprintRestarts = 0;
+                lastSprintNum = sprintNum;
+            }
+
+            // ─── ПРОВЕРКА: нужно ли resume для этого спринта ───
+            const savedSid = getSprintSessionId(sprintNum);
+            if (savedSid && savedSid !== sessionId) {
+                // Спринт привязан к другой сессии — нужен resume
+                chatLog(`🔄 Спринт ${sprintNum} привязан к сессии ${savedSid}. Resume...`, 'OVERSEER');
+                const resumed = await restartAgent(`resume спринта ${sprintNum}`, savedSid);
+                if (!resumed) {
+                    chatLog(`⚠️ Resume не удался. Начинаю новую сессию для спринта ${sprintNum}.`, 'OVERSEER');
+                    clearSprintSession(sprintNum);
+                    const freshStart = await restartAgent(`новая сессия для спринта ${sprintNum}`);
+                    if (!freshStart) { chatLog('❌ Перезапуск не удался. Остановка.', 'OVERSEER'); break; }
+                }
+            }
+
+            // ─── СОХРАНЯЕМ ПРИВЯЗКУ СПРИНТ → СЕССИЯ ───
+            if (!savedSid) {
+                saveSprintSession(sprintNum, sessionId);
+            }
+
+            chatLog(`🚀 Спринт ${sprintNum}: ${sprintTitle} (${undoneTasks.length} задач)`, 'OVERSEER');
+            writeStatus(true, { sprint: sprintNum, sprintTitle, tasksTotal: sprintTasks.length, tasksDone: sprintTasks.length - undoneTasks.length });
+
+            // ─── СОЗДАЁМ current_sprint.md ───
+            createCurrentSprintFile(sprintNum);
+            chatLog(`📋 Создан current_sprint.md с ${undoneTasks.length} задачами`, 'OVERSEER');
+
+            // ─── ФОРМИРУЕМ ПРОМПТ ───
             const testHint = detectedTestCommands.length > 0
-                ? ` ТЕСТИРОВАНИЕ: В проекте обнаружены тестовые команды: ${detectedTestCommands.map(c => `${c.cmd} (${c.desc})`).join('; ')}. После реализации запусти релевантные тесты для проверки.`
+                ? `\nТЕСТИРОВАНИЕ: В проекте обнаружены тестовые команды: ${detectedTestCommands.map(c => `${c.cmd} (${c.desc})`).join('; ')}. После реализации запусти релевантные тесты.`
                 : '';
-            // Относительный путь spec-файла для контекста
-            const specRelPath = path.relative(projectDir, task.file).replace(/\\/g, '/');
-            // Проверяем наличие референсных изображений
-            const specDirPath = path.dirname(task.file);
-            const refsPath = path.join(specDirPath, 'refs');
+
+            // Референсы
+            const sprintPrefix = sprintNum.toString().padStart(3, '0');
             let refsHint = '';
             try {
-                if (fs.existsSync(refsPath)) {
-                    const refFiles = fs.readdirSync(refsPath).filter(f => /\.(png|jpg|jpeg|gif|svg|webp)$/i.test(f));
-                    if (refFiles.length > 0) {
-                        const refsRelPath = path.relative(projectDir, refsPath).replace(/\\/g, '/');
-                        refsHint = `\nРЕФЕРЕНСЫ: В папке ${refsRelPath}/ есть визуальные референсы: ${refFiles.join(', ')}. Прочитай их через Read tool для понимания визуального контекста задачи.`;
+                const dirs = fs.readdirSync(specsDir).filter(d => d.startsWith(sprintPrefix + '-'));
+                for (const d of dirs) {
+                    const refsPath = path.join(specsDir, d, 'refs');
+                    if (fs.existsSync(refsPath)) {
+                        const refFiles = fs.readdirSync(refsPath).filter(f => /\.(png|jpg|jpeg|gif|svg|webp)$/i.test(f));
+                        if (refFiles.length > 0) {
+                            refsHint = `\nРЕФЕРЕНСЫ: В папке specs/${d}/refs/ есть визуальные референсы: ${refFiles.join(', ')}. Прочитай их через Read tool.`;
+                        }
                     }
                 }
-            } catch (e) { console.error('[error] read_reference_images:', e.message); }
-            const prompt = `ВЫПОЛНИ ЗАДАЧУ ${task.id}: ${task.text}\n\nКОНТЕКСТ: Спецификация задачи в файле ${specRelPath}. Прочитай его для полного описания.${refsHint}\n\nПРАВИЛА:\n1) Работай автономно, не задавай вопросов.\n2) Выполни ТОЛЬКО задачу ${task.id} — НЕ переходи к другим задачам. После завершения СРАЗУ выведи отчёт и ОСТАНОВИСЬ.\n3) Для записи файлов вне проекта используй путь ~/.claude/skills/.\n4) Если Write не работает — используй Bash.\n5) Используй доступные скиллы (Skill tool) если они подходят для задачи — профильные агенты, TDD, debugging, brainstorming и другие.${testHint}\n\nВАЖНО: Сначала ВЫПОЛНИ задачу (напиши код, создай файлы, запусти тесты). Только ПОСЛЕ завершения работы выведи отчёт.\nЕсли ты выведешь отчёт без реальной работы — задача будет назначена повторно.\nНЕ выполняй другие задачи. Следующую задачу тебе назначит оркестратор.\n\nФормат отчёта:\nRALPH_RESULT\nTASK: ${task.id}\nBRIEF: <1 предложение простым языком: что сделано с точки зрения пользователя, БЕЗ имён файлов/классов/функций>\nSUMMARY: <техническое описание: какие файлы создал/изменил, что конкретно сделал>\nSTATUS: DONE\nRALPH_END`;
+            } catch (e) {}
 
-            sendCommand(ptyProcess, prompt);
-            // Очищаем буферы чтобы шаблон RALPH_RESULT из промпта не попал в парсер
+            const sprintPrompt = `ВЫПОЛНИ СПРИНТ ${sprintNum}: ${sprintTitle}
+
+Прочитай файл current_sprint.md в корне проекта — там описаны все задачи этого спринта.
+Также прочитай соответствующий spec-файл из папки specs/ для подробных описаний.${refsHint}
+
+ПРАВИЛА:
+1) Работай автономно, не задавай вопросов.
+2) Выполни ВСЕ невыполненные задачи из спринта ${sprintNum} последовательно.
+3) НЕ нужно выводить отчёт после каждой задачи — просто выполняй одну за другой.
+4) НЕ переходи к задачам из других спринтов.
+5) Для записи файлов вне проекта используй путь ~/.claude/skills/.
+6) Если Write не работает — используй Bash.
+7) Используй доступные скиллы (Skill tool) если они подходят для задачи.${testHint}
+
+ВАЖНО: Сначала ВЫПОЛНИ все задачи (напиши код, создай файлы, запусти тесты).
+Только ПОСЛЕ завершения ВСЕХ задач спринта выведи маркер на ОТДЕЛЬНОЙ строке:
+
+RALPH_SPRINT_DONE`;
+
+            sendCommand(ptyProcess, sprintPrompt);
             logicalBuffer = '';
             jsonlBuffer = '';
 
-            let result = await waitForModel(extractResult, 1800);
+            // ─── ОЖИДАНИЕ ЗАВЕРШЕНИЯ СПРИНТА ───
+            let sprintResult = await waitForModel(extractSprintDone, 3600); // 1 час
 
-            // Если модель закончила работу, но не вывела отчёт — напомнить (до 3 попыток)
+            // Retry если нет маркера
             let retries = 0;
-            while (result === "FORMAT_ERROR" && retries < 3 && !stopRequested) {
+            while (!sprintResult && retries < 3 && !stopRequested) {
                 retries++;
                 const secSinceThinking = (Date.now() - lastThinkingTime) / 1000;
                 if (secSinceThinking < 120) {
-                    chatLog(`⏳ Задача ${task.id}: Claude ещё активен (${Math.round(secSinceThinking)}s назад). Ждём...`, 'OVERSEER');
-                    result = await waitForModel(extractResult, 600);
+                    chatLog(`⏳ Спринт ${sprintNum}: Claude ещё активен. Ждём...`, 'OVERSEER');
+                    sprintResult = await waitForModel(extractSprintDone, 600);
                     continue;
                 }
-                chatLog(`⚠️ Задача ${task.id}: модель не вывела отчёт. Напоминание (${retries}/3)...`, 'OVERSEER');
-                sendCommand(ptyProcess, `Задача ${task.id} завершена? Выведи отчёт БЕЗ markdown-форматирования. Напиши СВОИМИ СЛОВАМИ что сделал:\n\nRALPH_RESULT\nTASK: ${task.id}\nSUMMARY: опиши что сделал\nSTATUS: DONE\nRALPH_END`);
-                result = await waitForModel(extractResult, 300);
+                chatLog(`⚠️ Спринт ${sprintNum}: нет маркера. Напоминание (${retries}/3)...`, 'OVERSEER');
+                sendNudge(ptyProcess, `Ты закончил все задачи спринта ${sprintNum}? Если да, выведи маркер на отдельной строке:\n\nRALPH_SPRINT_DONE`);
+                sprintResult = await waitForModel(extractSprintDone, 300);
             }
 
-            if (result && result.status === "DONE") {
-                const safeId = task.id.replace(/\./g, '_');
-                fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
-                    status: "READY",
-                    task_id: result.task_id || task.id,
-                    brief: result.brief || '',
-                    summary: result.summary || "Задача выполнена."
-                }, null, 2), 'utf8');
+            if (stopRequested) break;
 
-                // Atomic file write with retry (race condition protection)
-                function safeWriteFile(filePath, updateFn, maxRetries = 3) {
-                    for (let attempt = 0; attempt < maxRetries; attempt++) {
-                        try {
-                            const content = fs.readFileSync(filePath, 'utf8');
-                            const updated = updateFn(content);
-                            if (updated !== null) {
-                                const tmpPath = filePath + '.tmp';
-                                fs.writeFileSync(tmpPath, updated, 'utf8');
-                                fs.renameSync(tmpPath, filePath);
-                            }
-                            return true;
-                        } catch (e) {
-                            if (attempt < maxRetries - 1) {
-                                const delay = 100 * (attempt + 1);
-                                const start = Date.now();
-                                while (Date.now() - start < delay) {} // busy-wait (sync context)
-                            } else {
-                                console.error(`safeWriteFile failed for ${filePath}: ${e.message}`);
-                                return false;
-                            }
-                        }
-                    }
-                }
-
-                // Отмечаем в spec.md
-                safeWriteFile(task.file, (content) => {
-                    const lines = content.split('\n');
-                    for (let i = 0; i < lines.length; i++) {
-                        if (lines[i].includes(`{{TASK:${task.id}}}`) && lines[i].includes('[ ]')) {
-                            lines[i] = lines[i].replace('[ ]', '[x]');
-                            return lines.join('\n');
-                        }
-                    }
-                    return null; // no change needed
-                });
-                // Отмечаем в tasks.md
-                const tasksFile = path.join(projectDir, 'tasks.md');
-                if (fs.existsSync(tasksFile)) {
-                    safeWriteFile(tasksFile, (content) => {
-                        const tLines = content.split('\n');
-                        for (let j = 0; j < tLines.length; j++) {
-                            if (tLines[j].includes(`{{TASK:${task.id}}}`) && tLines[j].includes('[ ]')) {
-                                tLines[j] = tLines[j].replace('[ ]', '[x]');
-                                return tLines.join('\n');
-                            }
-                        }
-                        return null;
-                    });
-                }
-                if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
-                const taskTitle = task.text.split('\n')[0].replace(/\{\{TASK:[\d.]+\}\}/g, '').trim();
-                // Fallback для brief: первое предложение summary без путей к файлам
-                let briefLine = result.brief;
-                if (!briefLine && result.summary) {
-                    briefLine = result.summary.split(/\.\s/)[0].replace(/`[^`]+`/g, '').replace(/\s{2,}/g, ' ').trim();
-                    if (briefLine.length > 150) briefLine = briefLine.slice(0, 147) + '...';
-                }
-                if (!briefLine) briefLine = taskTitle;
-                fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${task.id}: ${taskTitle}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${result.summary}\n\n</details>\n\n---\n\n`, 'utf8');
-                chatLog(`✅ ${task.id}: ${briefLine}`, 'OVERSEER');
-
-                // ─── АУДИТ СПРИНТА: проверяем границу ───
-                const currentSprint = getSprintNumber(task.id);
-                if (isSprintComplete(currentSprint)) {
-                    // Считаем попытки аудита этого спринта
-                    const attempts = sprintAuditAttempts[currentSprint] || 0;
-                    if (attempts < MAX_AUDIT_ATTEMPTS) {
-                        sprintAuditAttempts[currentSprint] = attempts + 1;
-                        chatLog(`📋 Спринт ${currentSprint} завершён. Аудит (попытка ${attempts + 1}/${MAX_AUDIT_ATTEMPTS})...`, 'OVERSEER');
-                        const auditResult = await auditSprint(currentSprint, attempts + 1);
-                        if (auditResult === 'FIX') {
-                            chatLog(`🔄 Аудитор добавил доработки в спринт ${currentSprint}. Выполняю, затем повторный аудит...`, 'OVERSEER');
-                            // НЕ увеличиваем lastCompletedSprint — после выполнения доработок
-                            // isSprintComplete снова сработает и запустит повторный аудит
-                        } else {
-                            // OK или таймаут — спринт закрыт
-
-                            // ─── СБОР НЕДОСТАЮЩИХ РЕЗУЛЬТАТОВ (пока сессия жива) ───
-                            const sprintTasks = getSprintTasks(currentSprint);
-                            const missingResults = sprintTasks.filter(t => {
-                                const safeId = t.id.replace(/\./g, '_');
-                                const resultPath = path.join(resultsDir, `${safeId}.json`);
-                                return !fs.existsSync(resultPath);
-                            });
-
-                            if (missingResults.length > 0) {
-                                chatLog(`📝 Не хватает результатов для ${missingResults.length} задач спринта ${currentSprint}. Запрашиваю у агента...`, 'OVERSEER');
-                                for (const mt of missingResults) {
-                                    if (stopRequested) break;
-                                    resetJsonlBuffer(); // очистка буфера перед каждым запросом
-                                    chatLog(`📝 Запрашиваю результат задачи ${mt.id}...`, 'OVERSEER');
-                                    sendCommand(ptyProcess, `Ты ранее выполнил задачу ${mt.id}. Напиши краткий отчёт о том, что было сделано. Выведи ТОЛЬКО отчёт в формате:\n\nRALPH_RESULT\nTASK: ${mt.id}\nBRIEF: что сделано с точки зрения пользователя\nSUMMARY: техническое описание\nSTATUS: DONE\nRALPH_END`);
-                                    const missingResult = await waitForModel(extractResult, 120);
-                                    if (missingResult && missingResult.status === 'DONE') {
-                                        const safeId = mt.id.replace(/\./g, '_');
-                                        fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
-                                            status: 'READY',
-                                            task_id: missingResult.task_id || mt.id,
-                                            brief: missingResult.brief || '',
-                                            summary: missingResult.summary || 'Задача выполнена.'
-                                        }, null, 2), 'utf8');
-                                        chatLog(`✅ Результат задачи ${mt.id} получен и сохранён.`, 'OVERSEER');
-                                    } else {
-                                        chatLog(`⚠️ Не удалось получить результат задачи ${mt.id}. Пропускаю.`, 'OVERSEER');
-                                    }
-                                }
-                            }
-
-                            // ─── КОММИТ СПРИНТА (после сбора всех результатов) ───
-                            const commitTitle = getSprintTitle(currentSprint);
-                            chatLog(`📦 Спринт ${currentSprint} закрыт. Коммитим...`, 'OVERSEER');
-                            try {
-                                const { execSync } = require('child_process');
-                                execSync('git add -A', { cwd: projectDir, timeout: 60000 });
-                                execSync(`git commit -m "Sprint ${currentSprint}: ${commitTitle}" --no-verify`, { cwd: projectDir, timeout: 60000 });
-                                chatLog(`💾 Коммит спринта ${currentSprint} создан.`, 'OVERSEER');
-                            } catch (commitErr) {
-                                chatLog(`⚠️ Не удалось закоммитить спринт ${currentSprint}: ${commitErr.message?.slice(0, 100)}`, 'OVERSEER');
-                            }
-
-                            // ─── ПЕРЕЗАПУСК АГЕНТА ПОСЛЕ СПРИНТА (сброс контекста) ───
-                            chatLog(`🧠 Спринт ${currentSprint} полностью закрыт. Перезапуск Claude Code для сброса контекста...`, 'OVERSEER');
-                            const sprintRestarted = await restartAgent(`сброс контекста после спринта ${currentSprint}`);
-                            if (!sprintRestarted) {
-                                chatLog(`❌ Не удалось перезапустить после спринта ${currentSprint}. Продолжаю в текущей сессии.`, 'OVERSEER');
-                            } else {
-                                chatLog(`✅ Claude Code перезапущен. Продолжаю со свежим контекстом.`, 'OVERSEER');
-                            }
-                        }
-                    }
-                    // Если MAX_AUDIT_ATTEMPTS исчерпан — молча продолжаем
-                }
-
-                await delay(3000);
-            } else if (stopRequested) {
-                // Стоп запрошен — не перезапускаем, просто выходим
-                break;
-            } else {
-                // ─── ПЕРЕЗАПУСК вместо остановки ───
-                totalRestarts++;
-                if (totalRestarts > MAX_RESTARTS) {
+            if (!sprintResult) {
+                // Спринт не завершён — перезапуск с resume
+                sprintRestarts++;
+                if (sprintRestarts > MAX_RESTARTS) {
                     chatLog(`❌ Превышен лимит перезапусков (${MAX_RESTARTS}). Остановка.`, 'OVERSEER');
+                    clearSprintSession(sprintNum); // clean stale session to avoid repeated resume failures
                     break;
                 }
-                chatLog(`⚠️ Сбой протокола в задаче ${task.id}. Перезапуск ${totalRestarts}/${MAX_RESTARTS}...`, 'OVERSEER');
-                const restarted = await restartAgent(`сбой протокола задачи ${task.id}`);
+                chatLog(`⚠️ Спринт ${sprintNum}: не завершён. Перезапуск ${sprintRestarts}/${MAX_RESTARTS} (resume)...`, 'OVERSEER');
+                // Resume той же сессии — Claude продолжит с сохранённым контекстом
+                const restarted = await restartAgent(`resume спринта ${sprintNum}`, sessionId);
                 if (!restarted) {
-                    chatLog(`❌ Не удалось перезапустить ${agent.name}. Остановка.`, 'OVERSEER');
+                    chatLog(`❌ Resume не удался. Остановка.`, 'OVERSEER');
                     break;
                 }
-                // Задача не отмечена как выполненная — findNextTask() вернёт её снова
-                chatLog(`🔁 Повторяю задачу ${task.id} после перезапуска.`, 'OVERSEER');
-                continue;
+                continue; // Вернёмся в цикл — findNextSprint вернёт тот же спринт
             }
+
+            // ─── СПРИНТ ЗАВЕРШЁН ───
+            chatLog(`✅ Спринт ${sprintNum}: все задачи выполнены!`, 'OVERSEER');
+
+            // Отмечаем все невыполненные задачи как [x]
+            for (const t of undoneTasks) {
+                markTaskDone(t);
+            }
+            chatLog(`✅ Отмечено ${undoneTasks.length} задач как выполненные`, 'OVERSEER');
+
+            // ─── АУДИТ ───
+            const attempts = sprintAuditAttempts[sprintNum] || 0;
+            if (attempts < MAX_AUDIT_ATTEMPTS) {
+                sprintAuditAttempts[sprintNum] = attempts + 1;
+                chatLog(`📋 Аудит спринта ${sprintNum} (попытка ${attempts + 1}/${MAX_AUDIT_ATTEMPTS})...`, 'OVERSEER');
+                const auditResult = await auditSprint(sprintNum, attempts + 1);
+                if (auditResult === 'FIX') {
+                    // Проверяем что аудитор действительно добавил задачи
+                    const postAuditSprint = findNextSprint();
+                    if (postAuditSprint && postAuditSprint.sprintNum === sprintNum && postAuditSprint.undoneTasks.length > 0) {
+                        chatLog(`🔄 Аудитор добавил ${postAuditSprint.undoneTasks.length} доработок в спринт ${sprintNum}. Продолжаю выполнение...`, 'OVERSEER');
+                    } else {
+                        chatLog(`⚠️ Аудитор сказал FIX, но невыполненных задач в спринте ${sprintNum} не найдено (возможно spec не создан). Продолжаю...`, 'OVERSEER');
+                    }
+                    continue; // Вернёмся — findNextSprint найдёт новые невыполненные задачи (или следующий спринт)
+                }
+            }
+
+            // ─── BATCH-СБОР ОТЧЁТОВ (один промпт на все задачи) ───
+            const allTasks = getSprintTasks(sprintNum);
+            // Фильтруем задачи, для которых уже есть результат
+            const tasksNeedingReport = allTasks.filter(t => {
+                const safeId = t.id.replace(/\./g, '_');
+                return !fs.existsSync(path.join(resultsDir, `${safeId}.json`));
+            });
+
+            if (tasksNeedingReport.length > 0) {
+                chatLog(`📝 Сбор отчётов: ${tasksNeedingReport.length} задач спринта ${sprintNum} (batch)...`, 'OVERSEER');
+
+                // Формируем один промпт для всех задач
+                const taskExamples = tasksNeedingReport.map(t =>
+                    `RALPH_RESULT\nTASK: ${t.id}\nBRIEF: что сделано с точки зрения пользователя (1 предложение без имён файлов)\nSUMMARY: техническое описание (какие файлы создал/изменил)\nSTATUS: DONE\nRALPH_END`
+                ).join('\n\n');
+
+                const batchPrompt = `Ты выполнил спринт ${sprintNum}. Выведи отчёт по КАЖДОЙ задаче. Выведи ВСЕ отчёты подряд без markdown-блоков:\n\n${taskExamples}`;
+
+                sendCommand(ptyProcess, batchPrompt);
+                logicalBuffer = '';
+                jsonlBuffer = '';
+
+                // Ждём пока в буфере появится нужное количество RALPH_RESULT блоков
+                const expectedCount = tasksNeedingReport.length;
+                const extractBatchResults = () => {
+                    const results = extractAllResults(jsonlBuffer);
+                    if (results.length >= expectedCount) return results;
+                    return null; // ещё не все
+                };
+
+                let batchResults = await waitForModel(extractBatchResults, 300);
+
+                // FORMAT_ERROR или таймаут — проверяем, может часть отчётов уже есть
+                if (batchResults === 'FORMAT_ERROR' || batchResults === null) {
+                    const partial = extractAllResults(jsonlBuffer);
+                    if (partial.length > 0) {
+                        chatLog(`⚠️ Batch-таймаут, но ${partial.length} отчётов уже получено`, 'OVERSEER');
+                        batchResults = partial;
+                    }
+                }
+
+                if (batchResults && Array.isArray(batchResults)) {
+                    // Сохраняем каждый результат
+                    if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
+                    for (const r of batchResults) {
+                        if (r.status !== 'DONE') continue;
+                        const taskId = r.task_id;
+                        const safeId = taskId.replace(/\./g, '_');
+                        fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
+                            status: 'READY',
+                            task_id: taskId,
+                            brief: r.brief || '',
+                            summary: r.summary || 'Задача выполнена.'
+                        }, null, 2), 'utf8');
+
+                        let briefLine = r.brief || r.summary?.split(/\.\s/)[0] || `Task ${taskId}`;
+                        if (briefLine.length > 150) briefLine = briefLine.slice(0, 147) + '...';
+                        fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${taskId}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${r.summary}\n\n</details>\n\n---\n\n`, 'utf8');
+                        chatLog(`✅ ${taskId}: ${(r.brief || '').slice(0, 80)}`, 'OVERSEER');
+                    }
+                    chatLog(`📝 Получено ${batchResults.length}/${expectedCount} отчётов`, 'OVERSEER');
+
+                    // Fallback: если не все задачи вернулись — дособираем по одной
+                    const collectedIds = new Set(batchResults.map(r => r.task_id));
+                    const missingTasks = tasksNeedingReport.filter(t => !collectedIds.has(t.id));
+                    for (const t of missingTasks) {
+                        if (stopRequested) break;
+                        resetJsonlBuffer();
+                        chatLog(`📝 [${t.id}] Дособираю отчёт (не вошёл в batch)...`, 'OVERSEER');
+                        sendCommand(ptyProcess, `Ты выполнил задачу ${t.id} в рамках спринта ${sprintNum}. Напиши краткий отчёт:\n\nRALPH_RESULT\nTASK: ${t.id}\nBRIEF: что сделано\nSUMMARY: техническое описание\nSTATUS: DONE\nRALPH_END`);
+                        const fallbackResult = await waitForModel(extractResult, 120);
+                        if (fallbackResult && fallbackResult.status === 'DONE') {
+                            const safeId = t.id.replace(/\./g, '_');
+                            fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
+                                status: 'READY',
+                                task_id: fallbackResult.task_id || t.id,
+                                brief: fallbackResult.brief || '',
+                                summary: fallbackResult.summary || 'Задача выполнена.'
+                            }, null, 2), 'utf8');
+                            let briefLine = fallbackResult.brief || `Task ${t.id}`;
+                            if (briefLine.length > 150) briefLine = briefLine.slice(0, 147) + '...';
+                            fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${t.id}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${fallbackResult.summary}\n\n</details>\n\n---\n\n`, 'utf8');
+                            chatLog(`✅ ${t.id}: ${(fallbackResult.brief || '').slice(0, 80)}`, 'OVERSEER');
+                        } else {
+                            chatLog(`⚠️ ${t.id}: не удалось получить отчёт`, 'OVERSEER');
+                        }
+                    }
+                } else {
+                    chatLog(`⚠️ Batch-сбор отчётов не удался. Пропускаю.`, 'OVERSEER');
+                }
+            } else {
+                chatLog(`✅ Все отчёты спринта ${sprintNum} уже собраны`, 'OVERSEER');
+            }
+
+            // ─── КОММИТ ───
+            chatLog(`📦 Спринт ${sprintNum} закрыт. Коммитим...`, 'OVERSEER');
+            try {
+                const { execSync } = require('child_process');
+                execSync('git add -A', { cwd: projectDir, timeout: 60000 });
+                execSync(`git commit -m "Sprint ${sprintNum}: ${sprintTitle}" --no-verify`, { cwd: projectDir, timeout: 60000 });
+                chatLog(`💾 Коммит спринта ${sprintNum} создан.`, 'OVERSEER');
+            } catch (commitErr) {
+                chatLog(`⚠️ Не удалось закоммитить: ${commitErr.message?.slice(0, 100)}`, 'OVERSEER');
+            }
+
+            // ─── CLEANUP ───
+            try { fs.unlinkSync(path.join(projectDir, 'current_sprint.md')); } catch {}
+            clearSprintSession(sprintNum); // Очищаем привязку сессии — спринт закрыт
+
+            // ─── ПЕРЕЗАПУСК ДЛЯ СЛЕДУЮЩЕГО СПРИНТА ───
+            chatLog(`🧠 Спринт ${sprintNum} полностью закрыт. Перезапуск для сброса контекста...`, 'OVERSEER');
+            const restarted = await restartAgent(`сброс контекста после спринта ${sprintNum}`);
+            if (!restarted) {
+                chatLog(`❌ Не удалось перезапустить. Остановка.`, 'OVERSEER');
+                break;
+            }
+            chatLog(`✅ Claude Code перезапущен. Продолжаю со свежим контекстом.`, 'OVERSEER');
         }
     }
     mainLoop().then(async () => {

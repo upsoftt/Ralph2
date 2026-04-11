@@ -14,3 +14,7 @@ package-lock.json
 dist/
 build/
 *.spec
+
+# MemPalace
+mempalace.yaml
+entities.json

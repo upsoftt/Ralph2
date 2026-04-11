@@ -20,13 +20,33 @@ function findClaude() {
     return 'claude'; // Последняя надежда
 }
 
+// Находим Git bash (для Claude Code CLAUDE_CODE_GIT_BASH_PATH)
+function findGitBash() {
+    if (process.env.CLAUDE_CODE_GIT_BASH_PATH) return process.env.CLAUDE_CODE_GIT_BASH_PATH;
+    const { execSync } = require('child_process');
+    try {
+        const gitPath = execSync('where git', { encoding: 'utf8', timeout: 5000 }).trim().split('\n')[0].trim();
+        if (gitPath) {
+            // git.exe is usually in Git/cmd/git.exe — bash is in Git/bin/bash.exe
+            const gitDir = require('path').resolve(require('path').dirname(gitPath), '..');
+            const bashPath = require('path').join(gitDir, 'bin', 'bash.exe');
+            if (require('fs').existsSync(bashPath)) return bashPath;
+        }
+    } catch (e) {}
+    // Fallback: common paths
+    for (const p of ['C:\\Program Files\\Git\\bin\\bash.exe', 'D:\\Program Files\\Git\\bin\\bash.exe']) {
+        if (require('fs').existsSync(p)) return p;
+    }
+    return undefined;
+}
+
 const AGENTS = {
     claude: {
         name: 'Claude Code',
         command: findClaude(),
         args: ['--dangerously-skip-permissions', '--model', process.env.RALPH_MODEL || 'sonnet'],
         pty: { cols: 140, rows: 100, useConpty: true },
-        env: { FORCE_COLOR: '1', CLAUDE_CODE_GIT_BASH_PATH: 'D:\\Program Files\\Git\\bin\\bash.exe' },
+        env: { FORCE_COLOR: '1', ...(findGitBash() ? { CLAUDE_CODE_GIT_BASH_PATH: findGitBash() } : {}) },
         // Шаги автоматической загрузки (выполняются последовательно при boot)
         bootSequence: [
             { wait: 'yes, i accept', send: '\x1b[B\r', delay: 500, desc: 'Accept bypass permissions' },

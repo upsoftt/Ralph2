@@ -48,14 +48,15 @@ icon = None
 console_visible = False
 
 def is_port_listening(port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.5)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.5)
         s.connect(('127.0.0.1', port))
-        s.close()
         return True
-    except:
+    except Exception:
         return False
+    finally:
+        s.close()
 
 def get_icon_image(state):
     # Создаем простую иконку: Зеленый кружок - работает, Красный - остановлен

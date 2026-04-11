@@ -106,10 +106,21 @@ LAUNCHED_PROCESSES = {}  # project_id -> subprocess.Popen
 LAUNCH_STATE_FILE = RALPH_DIR / "launch_state.json"
 
 def _save_busy_state():
-    """Сохраняет BUSY статусы на диск."""
+    """Сохраняет BUSY статусы на диск (вызывать внутри _busy_lock)."""
     try:
         BUSY_STATE_FILE.write_text(json.dumps(BUSY_PROJECTS), encoding='utf-8')
     except Exception as e: print(f"[error] save_busy_state: {e}")
+
+def _set_busy(pid, value):
+    """Thread-safe установка busy-статуса."""
+    with _busy_lock:
+        BUSY_PROJECTS[pid] = value; _save_busy_state()
+
+def _clear_busy(pid):
+    """Thread-safe очистка busy-статуса."""
+    with _busy_lock:
+        if pid in BUSY_PROJECTS:
+            del BUSY_PROJECTS[pid]; _save_busy_state()
 
 def _count_tasks_in_file(filepath):
     """Считает (done, total) задачи в секции ## Tasks файла spec.md."""
@@ -145,6 +156,8 @@ _restore_busy_state()
 
 import threading as _threading
 _launch_lock = _threading.Lock()
+_busy_lock = _threading.Lock()
+_start_lock = _threading.Lock()
 
 def _save_launch_state():
     """Сохраняет PID запущенных приложений на диск."""
@@ -195,6 +208,15 @@ import hashlib as _hashlib
 import socket as _socket
 _idea_queues = {}  # project_id -> queue.Queue
 _idea_workers = {}  # project_id -> Thread
+
+def _safe_subpath(base, user_input):
+    """Валидирует что user_input не выходит за пределы base (защита от path traversal)."""
+    if not user_input or '..' in user_input or '/' in user_input or '\\' in user_input:
+        return None
+    resolved = (Path(base) / user_input).resolve()
+    if not str(resolved).startswith(str(Path(base).resolve())):
+        return None
+    return resolved
 
 def _generate_port(project_id):
     """Генерирует уникальный порт для проекта на основе хеша id (диапазон 8100-9899)."""
@@ -419,8 +441,10 @@ def update_status():
                         # PID мёртв — ищем процесс по командной строке (fallback)
                         try:
                             import subprocess as _sp
+                            # Use PowerShell Get-CimInstance (works on Win10+Win11, wmic deprecated)
                             result = _sp.run(
-                                ['wmic', 'process', 'where', "name='node.exe'", 'get', 'processid,commandline'],
+                                ['powershell.exe', '-NoProfile', '-Command',
+                                 "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Select-Object ProcessId,CommandLine | Format-List"],
                                 capture_output=True, text=True, timeout=5
                             )
                             proj_path_str = str(proj.get("path", ""))
@@ -428,7 +452,8 @@ def update_status():
                                 if 'ralph-overseer' in line and proj_path_str.replace('\\', '/') in line.replace('\\', '/'):
                                     running = True
                                     break
-                        except:
+                        except Exception as e:
+                            print(f"[error] process_fallback_check: {e}")
                             running = False
 
                     # Уровень 2: если процесс мёртв — очищаем status.json автоматически
@@ -444,12 +469,13 @@ def update_status():
         p_path_obj = Path(proj["path"])
         launch_config = _load_launch_config(p_path_obj)
         launch_running = False
-        if proj["id"] in LAUNCHED_PROCESSES:
-            procs = LAUNCHED_PROCESSES[proj["id"]]
-            if isinstance(procs, list):
-                launch_running = any(p.poll() is None for p in procs)
-            else:
-                launch_running = procs.poll() is None
+        with _launch_lock:
+            if proj["id"] in LAUNCHED_PROCESSES:
+                procs = LAUNCHED_PROCESSES[proj["id"]]
+                if isinstance(procs, list):
+                    launch_running = any(p.poll() is None for p in procs)
+                else:
+                    launch_running = procs.poll() is None
         status_list.append({"id": proj["id"], "name": proj["name"], "path": str(proj["path"]), "total": total, "completed": done, "active": proj["id"] == ACTIVE_PROJECT_ID, "running": running, "paused": paused, "busy": BUSY_PROJECTS.get(proj["id"], False), "running_version": running_version, "all_done": all_done, "launch_available": launch_config is not None, "launch_description": launch_config.get("description", "") if launch_config else "", "launch_running": launch_running})
     spec_details = {}
     if active_proj:
@@ -511,9 +537,24 @@ class Handler(BaseHTTPRequestHandler):
             project = get_active_project()
             if not project: self.send_json({"success": False, "content": ""}); return
             r_dir = Path(project["path"]) / ".ralph-runner"
-            content4 = (r_dir / "live_console_4.log").read_text(encoding='utf-8', errors='replace') if (r_dir / "live_console_4.log").exists() else ""
+            qs = parse_qs(p.query)
+            offset = int(qs.get('offset', ['0'])[0])
+            log_file = r_dir / "live_console_4.log"
+            content4 = ""
+            new_offset = offset
+            if log_file.exists():
+                file_size = log_file.stat().st_size
+                if offset > file_size:
+                    offset = 0  # file was truncated, read from start
+                if file_size > offset:
+                    with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+                        f.seek(offset)
+                        content4 = f.read()
+                    new_offset = file_size
+                else:
+                    new_offset = offset
             status4 = (r_dir / "thinking_status.txt").read_text(encoding='utf-8', errors='replace').strip() if (r_dir / "thinking_status.txt").exists() else ""
-            self.send_json({"success": True, "content4": content4, "status4": status4})
+            self.send_json({"success": True, "content4": content4, "status4": status4, "offset": new_offset})
         elif p.path == "/api/crash-log":
             project = get_active_project()
             if not project: self.send_json({"success": False, "content": "No active project"}); return
@@ -530,7 +571,11 @@ class Handler(BaseHTTPRequestHandler):
             tid = qs.get('task_id', [''])[0].replace('.', '_')
             proj = next((pr for pr in PROJECTS if pr['id'] == pid), None)
             if proj:
-                report_path = Path(proj['path']) / ".ralph-runner" / "results" / f"{tid}.json"
+                results_dir = Path(proj['path']) / ".ralph-runner" / "results"
+                report_path = _safe_subpath(results_dir, f"{tid}.json")
+                if not report_path:
+                    self.send_json({"success": False, "error": "Invalid task_id"})
+                    return
                 if report_path.exists():
                     try:
                         data = json.loads(report_path.read_text(encoding='utf-8'))
@@ -562,12 +607,13 @@ class Handler(BaseHTTPRequestHandler):
             launch_config = _load_launch_config(p_path)
             # Check if already running
             running = False
-            if pid in LAUNCHED_PROCESSES:
-                procs = LAUNCHED_PROCESSES[pid]
-                if isinstance(procs, list):
-                    running = any(p.poll() is None for p in procs)
-                else:
-                    running = procs.poll() is None
+            with _launch_lock:
+                if pid in LAUNCHED_PROCESSES:
+                    procs = LAUNCHED_PROCESSES[pid]
+                    if isinstance(procs, list):
+                        running = any(p.poll() is None for p in procs)
+                    else:
+                        running = procs.poll() is None
             self.send_json({
                 "available": launch_config is not None,
                 "allDone": all_done,
@@ -589,6 +635,93 @@ class Handler(BaseHTTPRequestHandler):
                             if data.get('spec_name') == spec: res[t_name] = data
                         except Exception as e: print(f"[error] save_active_project: {e}")
             self.send_json(res)
+        elif p.path == "/api/sessions":
+            pid = parse_qs(p.query).get('project', [''])[0]
+            only_ralph = parse_qs(p.query).get('ralph', ['1'])[0] == '1'
+            proj = next((pr for pr in PROJECTS if pr['id'] == pid), None)
+            sessions = []
+            if proj:
+                # Load Ralph session IDs if filtering
+                ralph_ids = set()
+                if only_ralph:
+                    sess_file = Path(proj['path']) / ".ralph-runner" / "ralph_sessions.txt"
+                    if sess_file.exists():
+                        for line in sess_file.read_text(encoding='utf-8', errors='ignore').strip().split('\n'):
+                            if line.strip():
+                                ralph_ids.add(line.split('\t')[0].strip())
+
+                # Check both: workspace dir (new) and project dir (legacy)
+                proj_name = Path(proj['path']).name
+                ws_path = RALPH_DIR / "workspaces" / proj_name
+                ws_key = str(ws_path).replace(':', '-').replace('\\', '-').replace('/', '-')
+                proj_path = proj['path'].replace('/', '\\').rstrip('\\')
+                proj_key = proj_path.replace(':', '-').replace('\\', '-')
+                jsonl_dirs = []
+                ws_jsonl = Path.home() / ".claude" / "projects" / ws_key
+                proj_jsonl = Path.home() / ".claude" / "projects" / proj_key
+                if ws_jsonl.exists(): jsonl_dirs.append(('ralph', ws_jsonl))
+                if proj_jsonl.exists(): jsonl_dirs.append(('project', proj_jsonl))
+                seen_ids = set()
+                for source, jsonl_dir in jsonl_dirs:
+                    for f in sorted(jsonl_dir.glob("*.jsonl"), key=lambda x: x.stat().st_mtime, reverse=True):
+                        sid = f.stem
+                        if sid in seen_ids: continue
+                        seen_ids.add(sid)
+                        is_ralph = source == 'ralph' or sid in ralph_ids
+                        if only_ralph and ralph_ids and not is_ralph:
+                            continue
+                        st = f.stat()
+                        size_kb = st.st_size / 1024
+                        if size_kb < 1: label = f"{st.st_size} B"
+                        elif size_kb < 1024: label = f"{size_kb:.0f} KB"
+                        else: label = f"{size_kb/1024:.1f} MB"
+                        preview = ""
+                        try:
+                            with open(f, 'r', encoding='utf-8', errors='ignore') as jf:
+                                jf.seek(max(0, st.st_size - 50000))
+                                tail = jf.read()
+                            lines = []
+                            for ln in tail.split('\n'):
+                                ln = ln.strip()
+                                if not ln: continue
+                                try:
+                                    obj = json.loads(ln)
+                                    if obj.get('type') == 'assistant' and 'message' in obj:
+                                        msg = obj['message']
+                                        if isinstance(msg, dict):
+                                            for block in msg.get('content', []):
+                                                if isinstance(block, dict) and block.get('type') == 'text':
+                                                    txt = block['text'].strip()
+                                                    if txt and len(txt) > 10 and not txt.startswith('{'):
+                                                        lines.append(txt[:120])
+                                except: pass
+                            preview = ' | '.join(lines[-3:]) if lines else ''
+                            if len(preview) > 250: preview = preview[:247] + '...'
+                        except: pass
+                        sessions.append({
+                            "id": sid,
+                            "size": st.st_size,
+                            "size_label": label,
+                            "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%d.%m %H:%M"),
+                            "preview": preview,
+                            "ralph": is_ralph,
+                            "source": source
+                        })
+            self.send_json(sessions)
+        elif p.path == "/api/collect-status":
+            pid = parse_qs(p.query).get('project', [''])[0]
+            proj = next((pr for pr in PROJECTS if pr['id'] == pid), None)
+            if proj:
+                sf = Path(proj['path']) / ".ralph-runner" / "collect_status.json"
+                if sf.exists():
+                    try:
+                        self.send_json(json.loads(sf.read_text(encoding='utf-8')))
+                    except:
+                        self.send_json({"collecting": False})
+                else:
+                    self.send_json({"collecting": False})
+            else:
+                self.send_json({"collecting": False})
         else: self.send_error(404)
 
     def do_POST(self):
@@ -617,30 +750,31 @@ class Handler(BaseHTTPRequestHandler):
                 return
             proj_path = project["path"]
 
-            # Проверяем: не запущен ли уже Ralph Loop на этом проекте
-            stat_file = os.path.join(proj_path, ".ralph-runner", "status.json")
-            if os.path.exists(stat_file):
-                try:
-                    with open(stat_file, 'r', encoding='utf-8') as sf:
-                        st = json.loads(sf.read())
-                    if st.get('running') and st.get('pid') and _is_process_alive(st['pid']):
-                        self.send_json({"success": False, "error": f"Ralph уже запущен на этом проекте (PID {st['pid']})"})
-                        return
-                except Exception as e: print(f"[error] check_running_process: {e}")
+            with _start_lock:
+                # Проверяем: не запущен ли уже Ralph Loop на этом проекте
+                stat_file = os.path.join(proj_path, ".ralph-runner", "status.json")
+                if os.path.exists(stat_file):
+                    try:
+                        with open(stat_file, 'r', encoding='utf-8') as sf:
+                            st = json.loads(sf.read())
+                        if st.get('running') and st.get('pid') and _is_process_alive(st['pid']):
+                            self.send_json({"success": False, "error": f"Ralph уже запущен на этом проекте (PID {st['pid']})"})
+                            return
+                    except Exception as e: print(f"[error] check_running_process: {e}")
 
-            overseer = RALPH_DIR / "ralph-overseer.js"
-            env = os.environ.copy()
-            env['RALPH_MODEL'] = model
-            try:
-                subprocess.Popen(
-                    ['node', str(overseer), str(proj_path)],
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                    env=env
-                )
-                self.send_json({"success": True})
-            except Exception as e:
-                print(f"Ошибка запуска 4: {e}")
-                self.send_json({"success": False, "error": str(e)})
+                overseer = RALPH_DIR / "ralph-overseer.js"
+                env = os.environ.copy()
+                env['RALPH_MODEL'] = model
+                try:
+                    subprocess.Popen(
+                        ['node', str(overseer), str(proj_path)],
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        env=env
+                    )
+                    self.send_json({"success": True})
+                except Exception as e:
+                    print(f"Ошибка запуска 4: {e}")
+                    self.send_json({"success": False, "error": str(e)})
         elif p.path == "/api/stop":
             pid = body.get('project_id')
             project = next((p for p in PROJECTS if p['id'] == pid), None) or get_active_project()
@@ -689,14 +823,23 @@ class Handler(BaseHTTPRequestHandler):
                 p_path = Path(project['path'])
                 (p_path / ".ralph-stop").write_text("STOP", encoding='utf-8')
                 
-                # kill by pid
+                # kill by pid and wait for death before spawning new
+                old_pid = None
                 p_stat_file = p_path / ".ralph-runner" / "status.json"
                 if p_stat_file.exists():
                     try:
                         data = json.loads(p_stat_file.read_text(encoding='utf-8'))
                         if data.get('pid'):
-                            subprocess.run(['taskkill', '/F', '/PID', str(data['pid'])], capture_output=True)
+                            old_pid = data['pid']
+                            subprocess.run(['taskkill', '/F', '/PID', str(old_pid)], capture_output=True)
                     except Exception as e: print(f"[error] restart_kill_old: {e}")
+
+                # Wait for old process to die (up to 3 sec)
+                if old_pid:
+                    for _ in range(30):
+                        if not _is_process_alive(old_pid):
+                            break
+                        time.sleep(0.1)
 
                 overseer = RALPH_DIR / "ralph-overseer.js"
                 proj_path = project["path"]
@@ -706,17 +849,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"success": True})
             print("--- ПЕРЕЗАПУСК СЕРВЕРА ---")
             def restart_later():
-                time.sleep(0.5)
-                # Запускаем новый экземпляр перед смертью
+                time.sleep(0.3)
+                os._exit(42)  # exit first, let tray or external launcher restart
+            # If launched standalone (no tray), spawn new instance that waits for port
+            def restart_with_respawn():
+                time.sleep(0.3)
+                # Spawn new process that will wait for port to free up (SO_REUSEADDR + retry)
                 subprocess.Popen(
                     [sys.executable, str(RALPH_DIR / "ralph-tracker-web.py")],
                     cwd=str(RALPH_DIR),
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
-                time.sleep(1)
+                time.sleep(0.5)
                 os._exit(0)
             import threading
-            threading.Thread(target=restart_later, daemon=True).start()
+            threading.Thread(target=restart_with_respawn, daemon=True).start()
         elif p.path == "/api/clear-stream":
             project = get_active_project()
             if not project:
@@ -770,7 +917,11 @@ class Handler(BaseHTTPRequestHandler):
             pid, spec, task_idx, done = body.get('project_id'), body.get('spec_name'), body.get('task_idx'), body.get('done')
             proj = next((p for p in PROJECTS if p['id'] == pid), None)
             if proj:
-                sf = Path(proj['specs_dir']) / spec / "spec.md"
+                spec_dir = _safe_subpath(proj['specs_dir'], spec)
+                if not spec_dir:
+                    self.send_json({"success": False, "error": "Invalid spec name"})
+                    return
+                sf = spec_dir / "spec.md"
                 if sf.exists():
                     with _file_lock:
                         content_text = sf.read_text(encoding='utf-8')
@@ -815,7 +966,7 @@ class Handler(BaseHTTPRequestHandler):
         elif p.path == "/api/generate-specs":
             pid = body.get('project_id'); proj = next((p for p in PROJECTS if p['id'] == pid), None)
             if proj:
-                BUSY_PROJECTS[pid] = "Generating Specs..."; _save_busy_state()
+                _set_busy(pid, "Generating Specs...")
                 def run_gen():
                     try:
                         subprocess.run([
@@ -824,8 +975,7 @@ class Handler(BaseHTTPRequestHandler):
                             '-ProjectDir', str(proj["path"])
                         ])
                     finally:
-                        if pid in BUSY_PROJECTS: del BUSY_PROJECTS[pid]
-                        _save_busy_state()
+                        _clear_busy(pid)
                 import threading; threading.Thread(target=run_gen).start()
                 self.send_json({"success": True})
         elif p.path == "/api/delete-project":
@@ -835,21 +985,25 @@ class Handler(BaseHTTPRequestHandler):
             # Очистка словарей для удалённого проекта
             if pid in _idea_queues: del _idea_queues[pid]
             if pid in _idea_workers: del _idea_workers[pid]
-            if pid in LAUNCHED_PROCESSES:
-                procs = LAUNCHED_PROCESSES.pop(pid)
-                if not isinstance(procs, list): procs = [procs]
-                for proc in procs:
-                    try: subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
-                    except Exception as e: print(f"[error] save_task_desc: {e}")
-            if pid in BUSY_PROJECTS:
-                del BUSY_PROJECTS[pid]; _save_busy_state()
+            with _launch_lock:
+                if pid in LAUNCHED_PROCESSES:
+                    procs = LAUNCHED_PROCESSES.pop(pid)
+                    if not isinstance(procs, list): procs = [procs]
+                    for proc in procs:
+                        try: subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
+                        except Exception as e: print(f"[error] delete_project_kill: {e}")
+            _clear_busy(pid)
             _save_launch_state()
             self.send_json({"success": True})
         elif p.path == "/api/save-task-description":
             pid, spec, task, desc = body.get('project_id'), body.get('spec_name'), body.get('task_header'), body.get('new_description')
             proj = next((p for p in PROJECTS if p['id'] == pid), None)
             if proj:
-                sf = Path(proj['specs_dir']) / spec / "spec.md"
+                spec_dir = _safe_subpath(proj['specs_dir'], spec)
+                if not spec_dir:
+                    self.send_json({"success": False, "error": "Invalid spec name"})
+                    return
+                sf = spec_dir / "spec.md"
                 if sf.exists():
                     try:
                         with _file_lock:
@@ -876,7 +1030,11 @@ class Handler(BaseHTTPRequestHandler):
             if not proj or not spec_name:
                 self.send_json({"success": False, "error": "Missing params"})
                 return
-            sf = Path(proj['specs_dir']) / spec_name / "spec.md"
+            spec_dir = _safe_subpath(proj['specs_dir'], spec_name)
+            if not spec_dir:
+                self.send_json({"success": False, "error": "Invalid spec name"})
+                return
+            sf = spec_dir / "spec.md"
             if not sf.exists():
                 self.send_json({"success": False, "error": "Spec not found"})
                 return
@@ -933,8 +1091,7 @@ class Handler(BaseHTTPRequestHandler):
                         t_insert = len(t_lines)
                         t_in_sprint = False
                         t_last_task = -1
-                        sprint_header_pattern = re.compile(r'^##\s+.*' + re.escape(spec_name.split('-', 1)[-1].strip()[:20]), re.IGNORECASE)
-                        # More reliable: find by sprint number in TASK ids
+                        # Find by sprint number in TASK ids
                         for j, tl in enumerate(t_lines):
                             if f"{{{{TASK:{sprint_num}." in tl:
                                 t_last_task = j
@@ -960,7 +1117,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # Очередь идей: если воркер уже работает, идея встаёт в очередь
             if pid not in _idea_queues:
-                _idea_queues[pid] = _queue.Queue()
+                _idea_queues[pid] = _queue.Queue(maxsize=20)
+            if _idea_queues[pid].full():
+                self.send_json({"success": False, "error": "Очередь идей переполнена (макс. 20). Дождитесь обработки."})
+                return
             _idea_queues[pid].put(idea_text)
             # Запускаем воркер если его нет или он завершился
             if pid not in _idea_workers or not _idea_workers[pid].is_alive():
@@ -975,7 +1135,7 @@ class Handler(BaseHTTPRequestHandler):
                         if not ideas:
                             break
                         count = len(ideas)
-                        BUSY_PROJECTS[project_id] = f"AI анализирует {'идею' if count == 1 else f'{count} идей'}..."; _save_busy_state()
+                        _set_busy(project_id, f"AI анализирует {'идею' if count == 1 else f'{count} идей'}...")
                         proj_path = proj_data['path']
                         specs_dir = proj_data.get('specs_dir', os.path.join(proj_path, 'specs'))
                         # Снимок mtime spec-файлов ДО запуска
@@ -1008,8 +1168,7 @@ class Handler(BaseHTTPRequestHandler):
                                 after_snap = get_spec_snapshot()
                                 if after_snap != before_snap:
                                     print(f"[IDEA] Spec files changed, clearing busy status")
-                                    if project_id in BUSY_PROJECTS:
-                                        del BUSY_PROJECTS[project_id]; _save_busy_state()
+                                    _clear_busy(project_id)
                                     before_snap = after_snap  # Продолжаем мониторить
                             try:
                                 proc.wait(timeout=660)
@@ -1025,8 +1184,7 @@ class Handler(BaseHTTPRequestHandler):
                             print(f"[IDEA] ralph-idea.js exit code: {proc.returncode}, processed {count} idea(s)")
                         except Exception as e:
                             print(f"Idea generation error: {e}")
-                    if project_id in BUSY_PROJECTS:
-                        del BUSY_PROJECTS[project_id]; _save_busy_state()
+                    _clear_busy(project_id)
                 _idea_workers[pid] = _threading.Thread(target=idea_worker, args=(pid, proj), daemon=True)
                 _idea_workers[pid].start()
             self.send_json({"success": True})
@@ -1056,7 +1214,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             proj_path = proj['path']
             project_port = _generate_port(pid)
-            BUSY_PROJECTS[pid] = "AI определяет способ запуска..."; _save_busy_state()
+            _set_busy(pid, "AI определяет способ запуска...")
             def gen_launch():
                 try:
                     prompt = (
@@ -1095,27 +1253,28 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     print(f"Generate launch error: {e}")
                 finally:
-                    if pid in BUSY_PROJECTS: del BUSY_PROJECTS[pid]; _save_busy_state()
+                    _clear_busy(pid)
             _threading.Thread(target=gen_launch, daemon=True).start()
             self.send_json({"success": True})
         elif p.path == "/api/launch-stop":
             pid = body.get('project_id')
-            if pid in LAUNCHED_PROCESSES:
-                procs = LAUNCHED_PROCESSES[pid]
-                if not isinstance(procs, list):
-                    procs = [procs]
-                for proc in procs:
-                    if proc.poll() is None:
+            with _launch_lock:
+                if pid in LAUNCHED_PROCESSES:
+                    procs = LAUNCHED_PROCESSES[pid]
+                    if not isinstance(procs, list):
+                        procs = [procs]
+                    for proc in procs:
+                        if proc.poll() is None:
+                            try:
+                                subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
+                            except Exception as e: print(f"[error] launch_stop_kill: {e}")
+                    # Ждём завершения всех процессов (до 5 секунд)
+                    for proc in procs:
                         try:
-                            subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True)
-                        except Exception as e: print(f"[error] launch_stop_kill: {e}")
-                # Ждём завершения всех процессов (до 5 секунд)
-                for proc in procs:
-                    try:
-                        proc.wait(timeout=5)
-                    except Exception as e: print(f"[error] launch_stop_wait: {e}")
-                del LAUNCHED_PROCESSES[pid]
-                _save_launch_state()
+                            proc.wait(timeout=5)
+                        except Exception as e: print(f"[error] launch_stop_wait: {e}")
+                    del LAUNCHED_PROCESSES[pid]
+                    _save_launch_state()
             self.send_json({"success": True})
         elif p.path == "/api/open-folder":
             req_path = body.get('path', '')
@@ -1127,18 +1286,44 @@ class Handler(BaseHTTPRequestHandler):
                 return
             os.startfile(norm_req)
             self.send_json({"success": True})
+        elif p.path == "/api/collect-results":
+            pid = body.get('project_id')
+            session_id = body.get('session_id', '')
+            task_ids = body.get('task_ids', '')
+            project = next((pr for pr in PROJECTS if pr['id'] == pid), None)
+            if not project:
+                self.send_json({"success": False, "error": "Project not found"})
+                return
+            if not session_id:
+                self.send_json({"success": False, "error": "session_id is required"})
+                return
+            proj_path = project["path"]
+            collector = RALPH_DIR / "collect-sprint-results.js"
+            args = ['node', str(collector), str(proj_path), session_id]
+            if task_ids:
+                args.append(task_ids)
+            try:
+                subprocess.Popen(
+                    args,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                    cwd=str(proj_path)
+                )
+                self.send_json({"success": True, "message": f"Сбор результатов запущен (session: {session_id[:8]}...)"})
+            except Exception as e:
+                self.send_json({"success": False, "error": str(e)})
         else: self.send_error(404)
 
     def _do_reset_progress(self, proj):
         p_path = Path(proj['path']); specs_dir = Path(proj['specs_dir'])
-        if specs_dir.exists():
-            for sf in specs_dir.rglob("spec.md"):
-                c = sf.read_text(encoding='utf-8', errors='ignore').replace('- [x]', '- [ ]')
-                sf.write_text(c, encoding='utf-8')
-        tmd = p_path / "tasks.md"
-        if tmd.exists():
-            c = tmd.read_text(encoding='utf-8', errors='ignore').replace('- [x]', '- [ ]')
-            tmd.write_text(c, encoding='utf-8')
+        with _file_lock:
+            if specs_dir.exists():
+                for sf in specs_dir.rglob("spec.md"):
+                    c = sf.read_text(encoding='utf-8', errors='ignore').replace('- [x]', '- [ ]')
+                    sf.write_text(c, encoding='utf-8')
+            tmd = p_path / "tasks.md"
+            if tmd.exists():
+                c = tmd.read_text(encoding='utf-8', errors='ignore').replace('- [x]', '- [ ]')
+                tmd.write_text(c, encoding='utf-8')
         r_dir = p_path / ".ralph-runner" / "results"
         if r_dir.exists():
             for f in r_dir.glob("*.json"): f.unlink()
@@ -1253,7 +1438,7 @@ def get_dashboard_html():
     .busy-badge { display:inline-flex; align-items:center; gap:6px; color:var(--orange); font-size:0.75em; font-weight:600; background:rgba(210,153,34,0.1); border:1px solid rgba(210,153,34,0.25); padding:2px 10px; border-radius:12px; }
     .busy-spinner { width:12px; height:12px; border:2px solid rgba(210,153,34,0.3); border-top-color:var(--orange); border-radius:50%; animation:busySpin 0.8s linear infinite; flex-shrink:0; }
     @keyframes busySpin { to { transform:rotate(360deg); } }
-    .menu-dropdown { position: absolute; background: #1c2128; border: 1px solid var(--border); border-radius: 8px; padding: 6px; width: max-content; z-index: 9999; display: none; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+    .menu-dropdown { position: fixed; background: #1c2128; border: 1px solid var(--border); border-radius: 8px; padding: 6px; width: max-content; z-index: 9999; display: none; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
     .menu-dropdown.show { display: block; }
     .menu-item { display: flex; align-items: center; gap: 10px; padding: 10px 12px; font-size: 0.9em; border-radius: 6px; cursor: pointer; transition: 0.2s; color: var(--text); }
     .menu-item:hover { background: var(--bg-hover); }
@@ -1288,6 +1473,13 @@ def get_dashboard_html():
     .log-ts { color: var(--text-dim); font-size: 0.85em; margin-right: 8px; }
     .custom-modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 99998; display: none; background: rgba(0,0,0,0.4); backdrop-filter: blur(2px); }
     .custom-modal { position: absolute; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); z-index: 99999; display: none; min-width: 280px; max-width: 400px; color: var(--text); font-size: 0.95em; animation: modalIn 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
+    .custom-modal.resizable { resize: both; overflow: auto; }
+    /* Custom scrollbar */
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.25); }
+    ::-webkit-scrollbar-corner { background: transparent; }
     .custom-modal.center { top: 50% !important; left: 50% !important; transform: translate(-50%, -50%); position: fixed; animation: modalInCenter 0.2s cubic-bezier(0.16, 1, 0.3, 1); }
     .custom-modal .modal-msg { margin-bottom: 20px; line-height: 1.4; }
     .custom-modal .modal-btns { display: flex; justify-content: flex-end; gap: 10px; }
@@ -1404,6 +1596,7 @@ def get_dashboard_html():
     <div class="menu-item" onclick="handleMenu(event, 'restart')"><span id="m-icon-restart"></span> Перезапустить</div>
     <div class="menu-item warning" onclick="handleMenu(event, 'crash')"><span id="m-icon-crash"></span> Лог ошибок (crash.log)</div>
     <div class="menu-item" onclick="handleMenu(event, 'gen')"><span id="m-icon-gen"></span> Сгенерировать спецификации</div>
+    <div class="menu-item" onclick="handleMenu(event, 'collect')"><span id="m-icon-collect"></span> Собрать результаты</div>
     <div class="menu-item warning" onclick="handleMenu(event, 'reset')"><span id="m-icon-reset"></span> Сбросить прогресс</div>
     <div class="menu-item warning" onclick="handleMenu(event, 'reset-ralph')"><span id="m-icon-reset-full"></span> Сброс Ralph (прогресс + результаты)</div>
     <div class="menu-item danger" onclick="handleMenu(event, 'delete')"><span id="m-icon-trash"></span> Удалить из списка</div>
@@ -1422,7 +1615,8 @@ def get_dashboard_html():
         square: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="4"/></svg>',
         chevron: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>',
         copy: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>',
-        launch: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" stroke="currentColor" stroke-width="2"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" stroke="currentColor" stroke-width="2"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 3 0 3 0" stroke="currentColor" stroke-width="2"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-3 0-3" stroke="currentColor" stroke-width="2"/><path d="M20 7l1-2.5L23.5 5l-2.5-1L20 1.5 19 4l-2.5 1L19 6z" fill="#a78bfa" opacity="0.9"/><path d="M3.5 8l.6-1.5L5.5 6l-1.4-.5L3.5 4 2.9 5.5 1.5 6l1.4.5z" fill="#a78bfa" opacity="0.6"/></svg>'
+        launch: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" stroke="currentColor" stroke-width="2"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" stroke="currentColor" stroke-width="2"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 3 0 3 0" stroke="currentColor" stroke-width="2"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-3 0-3" stroke="currentColor" stroke-width="2"/><path d="M20 7l1-2.5L23.5 5l-2.5-1L20 1.5 19 4l-2.5 1L19 6z" fill="#a78bfa" opacity="0.9"/><path d="M3.5 8l.6-1.5L5.5 6l-1.4-.5L3.5 4 2.9 5.5 1.5 6l1.4.5z" fill="#a78bfa" opacity="0.6"/></svg>',
+        collect: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
     };
 
     let activeId = null, renderedProjectId = null, isEditing = false, firstLoadDone = false, menuTarget = null, menuX = 0, menuY = 0;
@@ -1578,13 +1772,128 @@ def get_dashboard_html():
         overlay.style.display = 'block';
         modal.style.display = 'block';
         modal.classList.add('center');
-        modal.style.top = '';
-        modal.style.left = '';
     }
 
     function closeCustomModal() {
+        const modal = document.getElementById('customModal');
         document.getElementById('customModalOverlay').style.display = 'none';
-        document.getElementById('customModal').style.display = 'none';
+        modal.style.display = 'none';
+        modal.style.maxWidth = ''; modal.style.width = '';
+        modal.classList.remove('resizable');
+    }
+
+    function getSessionIdsFromConsole() {
+        const el = document.getElementById('console');
+        if (!el) return [];
+        const text = el.textContent || '';
+        const re = /Session ID:\s*([0-9a-f-]{36})/gi;
+        const ids = []; let m;
+        while ((m = re.exec(text)) !== null) {
+            if (!ids.includes(m[1])) ids.push(m[1]);
+        }
+        return ids;
+    }
+
+    async function showCollectDialog(projectId, x, y) {
+        const overlay = document.getElementById('customModalOverlay');
+        const modal = document.getElementById('customModal');
+        const msgEl = document.getElementById('customModalMsg');
+        const btnContainer = document.getElementById('customModalBtns');
+
+        // Fetch sessions from API
+        let sessions = [];
+        try {
+            const r = await fetch(`/api/sessions?project=${encodeURIComponent(projectId)}`);
+            sessions = await r.json();
+        } catch {}
+
+        // Also grab from console as fallback
+        const consoleSids = getSessionIdsFromConsole();
+        // Merge: API sessions first, console-only sessions appended
+        const apiIds = new Set(sessions.map(s => s.id));
+        for (const cid of consoleSids) {
+            if (!apiIds.has(cid)) sessions.push({ id: cid, size_label: '?', mtime: 'консоль' });
+        }
+
+        // Build session table rows
+        const rows = sessions.map((s, i) => {
+            const sizeColor = s.size > 1000000 ? '#3fb950' : s.size > 100000 ? '#58a6ff' : 'var(--text-dim)';
+            const prev = s.preview ? esc(s.preview) : '<span style="opacity:0.4">—</span>';
+            const badge = s.ralph ? '<span title="Ralph session" style="color:#a78bfa;margin-left:4px;">R</span>' : '';
+            return `<tr class="session-row" data-sid="${s.id}" onclick="document.querySelectorAll('.session-row').forEach(r=>r.style.background='');this.style.background='rgba(88,166,255,0.15)';document.getElementById('collectSidSelect').value=this.dataset.sid;" style="cursor:pointer;border-bottom:1px solid var(--border);${i===0?'background:rgba(88,166,255,0.15);':''}">
+                <td style="padding:10px 12px;font-family:Consolas,monospace;white-space:nowrap;">${s.id.slice(0,8)}…${badge}</td>
+                <td style="padding:10px 12px;white-space:nowrap;">${s.mtime}</td>
+                <td style="padding:10px 12px;white-space:nowrap;color:${sizeColor};font-weight:bold;">${s.size_label}</td>
+                <td style="padding:10px 12px;color:var(--text-dim);max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${prev}</td>
+            </tr>`;
+        }).join('');
+
+        const defaultSid = sessions.length > 0 ? sessions[0].id : '';
+
+        const hasRalphSessions = sessions.some(s => s.ralph);
+
+        msgEl.innerHTML = `
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+                <span style="font-weight:bold;color:var(--blue);font-size:1.05em;">Собрать результаты</span>
+                ${hasRalphSessions ? `<label style="font-size:0.8em;color:var(--text-dim);cursor:pointer;display:flex;align-items:center;gap:4px;"><input type="checkbox" id="showAllSessions" onchange="toggleSessionFilter('${esc(projectId)}')" style="cursor:pointer;"> Все сессии</label>` : ''}
+            </div>
+            <input type="hidden" id="collectSidSelect" value="${defaultSid}">
+            <div style="margin-bottom:6px;font-size:0.85em;color:var(--text-dim);">Выберите сессию <span style="opacity:0.6">(большой файл = много работы)</span></div>
+            <div style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:14px;">
+                <table style="width:100%;border-collapse:collapse;font-size:0.95em;">
+                    <thead><tr style="background:rgba(255,255,255,0.05);position:sticky;top:0;">
+                        <th style="padding:8px 12px;text-align:left;font-weight:600;">ID</th>
+                        <th style="padding:8px 12px;text-align:left;font-weight:600;">Время</th>
+                        <th style="padding:8px 12px;text-align:left;font-weight:600;">Размер</th>
+                        <th style="padding:8px 12px;text-align:left;font-weight:600;">Превью</th>
+                    </tr></thead>
+                    <tbody>${rows || '<tr><td colspan="4" style="padding:10px;text-align:center;color:var(--text-dim);">Сессии не найдены</td></tr>'}</tbody>
+                </table>
+            </div>
+            <label style="display:block;margin-bottom:4px;font-size:0.85em;color:var(--text-dim);">ID задач <span style="opacity:0.6">(пусто = авто: [x] без результата)</span></label>
+            <input id="collectTasksInput" type="text" value="" placeholder="5.3,5.4,5.5,6.1,..."
+                style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:Consolas,monospace;font-size:0.9em;box-sizing:border-box;">
+        `;
+
+        btnContainer.innerHTML = '';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'btn';
+        cancelBtn.innerText = 'Отмена';
+        cancelBtn.onclick = closeCustomModal;
+
+        const okBtn = document.createElement('button');
+        okBtn.className = 'btn btn-primary';
+        okBtn.innerText = 'Собрать';
+        okBtn.onclick = async () => {
+            const sid = document.getElementById('collectSidSelect').value.trim();
+            const tasks = document.getElementById('collectTasksInput').value.trim();
+            closeCustomModal();
+            if (!sid) return;
+            const r = await fetch('/api/collect-results', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:projectId, session_id:sid, task_ids:tasks})});
+            const d = await r.json();
+            if (d.success) {
+                customAlert('Сбор запущен! Прогресс в консоли.');
+                const poll = setInterval(async () => {
+                    try {
+                        const sr = await fetch('/api/collect-status?project=' + encodeURIComponent(projectId));
+                        const sd = await sr.json();
+                        if (!sd.collecting) { clearInterval(poll); if (sd.message) customAlert(sd.message); refresh(); }
+                    } catch { clearInterval(poll); }
+                }, 5000);
+            } else {
+                customAlert('Ошибка: ' + esc(d.error || 'unknown'));
+            }
+        };
+
+        btnContainer.appendChild(cancelBtn);
+        btnContainer.appendChild(okBtn);
+
+        modal.style.maxWidth = '750px';
+        modal.style.width = '90vw';
+        modal.classList.add('resizable');
+        overlay.style.display = 'block';
+        modal.style.display = 'block';
+        modal.classList.add('center');
     }
 
     function initStaticIcons() {
@@ -1596,6 +1905,7 @@ def get_dashboard_html():
         _si('m-icon-reset', ICONS.refresh);
         _si('m-icon-reset-full', ICONS.trash);
         _si('m-icon-trash', ICONS.trash);
+        _si('m-icon-collect', ICONS.collect);
     }
 
     function getSafeId(s) { return s.replace(/[^a-z0-9]/gi, '_'); }
@@ -1852,18 +2162,22 @@ def get_dashboard_html():
 
         function showMenu(e, id, running, busy, paused, allDone) {
             e.stopPropagation(); menuTarget = { id, running, busy, paused, allDone };
-            menuX = e.pageX; menuY = e.pageY;
+            menuX = e.clientX; menuY = e.clientY;
             const menu = document.getElementById('ctxMenu');
             menu.style.display = 'block';
-    
-            let left = e.pageX;
-            let top = e.pageY;
-    
+
+            let left = e.clientX;
+            let top = e.clientY;
+
             // Prevent menu from going off the right screen edge
             if (left + menu.offsetWidth > window.innerWidth) {
                 left = window.innerWidth - menu.offsetWidth - 10;
             }
-    
+            // Prevent menu from going off the bottom screen edge
+            if (top + menu.offsetHeight > window.innerHeight) {
+                top = Math.max(10, window.innerHeight - menu.offsetHeight - 10);
+            }
+
             menu.style.left = left + 'px';
             menu.style.top = top + 'px';
     
@@ -1910,6 +2224,10 @@ def get_dashboard_html():
             });
         }
         else if (type === 'gen') { document.getElementById('ctxMenu').style.display = 'none'; await fetch('/api/generate-specs', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:id})}); refresh(); }
+        else if (type === 'collect') {
+            document.getElementById('ctxMenu').style.display = 'none';
+            showCollectDialog(id, menuX, menuY);
+        }
         else if (type === 'reset-ralph') {
             document.getElementById('ctxMenu').style.display = 'none';
             customConfirm(`Сброс Ralph: прогресс (галочки), результаты и логи будут очищены.<br><br>Исходный код проекта <b>не затрагивается</b>.<br><br>Продолжить?`, menuX, menuY, async () => {
@@ -2021,8 +2339,8 @@ def get_dashboard_html():
     }
 
     async function clearConsole() { 
-        await fetch('/api/clear-stream', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({})}); 
-        consoleData[4] = ''; consoleStatusData[4] = '';
+        await fetch('/api/clear-stream', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({})});
+        consoleData[4] = ''; consoleStatusData[4] = ''; streamOffset = 0;
         document.getElementById('console').innerHTML = '';
         updateConsoleStatusDisplay();
     }
@@ -2110,13 +2428,22 @@ def get_dashboard_html():
     
     document.addEventListener('click', () => document.getElementById('ctxMenu').style.display = 'none');
     setInterval(refresh, 3000);
+    let streamOffset = 0;
     setInterval(async () => {
         try {
-            const r = await fetch('/api/stream'), d = await r.json();
+            const r = await fetch('/api/stream?offset=' + streamOffset), d = await r.json();
             const el = document.getElementById('console');
             if(d.success) {
-                const p4 = processConsoleData(d.content4 !== undefined ? d.content4 : '', d.status4 || '');
-                consoleData[4] = p4.text; consoleStatusData[4] = p4.status;
+                if (d.offset !== undefined) {
+                    if (d.offset < streamOffset) { consoleData[4] = ''; streamOffset = 0; } // file truncated
+                    streamOffset = d.offset;
+                }
+                if (d.content4) {
+                    const p4 = processConsoleData(d.content4, d.status4 || '');
+                    consoleData[4] += p4.text; consoleStatusData[4] = p4.status;
+                } else if (d.status4) {
+                    consoleStatusData[4] = processConsoleData('', d.status4).status;
+                }
 
                 const currentText = consoleData[activeConsoleTab];
                 const isAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
@@ -2132,7 +2459,7 @@ def get_dashboard_html():
     async function launchProject(pid) {
         const r = await fetch('/api/launch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:pid})});
         const d = await r.json();
-        if (!d.success && d.error) { alert('Ошибка запуска: ' + d.error); }
+        if (!d.success && d.error) { customAlert('Ошибка запуска: ' + esc(d.error)); }
         refresh();
     }
     async function launchStop(pid) {
@@ -2305,12 +2632,25 @@ if __name__ == "__main__":
                 os._exit(0)
             return False
         HANDLER_ROUTINE = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
-        kernel32.SetConsoleCtrlHandler(HANDLER_ROUTINE(_console_handler), True)
+        _handler_ref = HANDLER_ROUTINE(_console_handler)  # prevent GC collection
+        kernel32.SetConsoleCtrlHandler(_handler_ref, True)
     except Exception as e: print(f"[error] start_server: {e}")
 
     print(f"🧸 Ralph 2.0 at http://127.0.0.1:{WEB_PORT}")
 
-    server = HTTPServer(('127.0.0.1', WEB_PORT), Handler)
+    # Retry bind с ожиданием освобождения порта (при restart-server)
+    server = None
+    for attempt in range(10):
+        try:
+            server = HTTPServer(('127.0.0.1', WEB_PORT), Handler)
+            break
+        except OSError as e:
+            if attempt < 9:
+                print(f"[warn] Порт {WEB_PORT} занят, ожидание... ({attempt+1}/10)")
+                time.sleep(1)
+            else:
+                print(f"[FATAL] Не удалось захватить порт {WEB_PORT}: {e}")
+                os._exit(1)
 
     # TrayConsole интеграция
     _tc = None
