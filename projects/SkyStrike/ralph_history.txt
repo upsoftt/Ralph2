@@ -1,0 +1,1 @@
+2026-02-26 18:40:09 STARTED: 001-Engine Foundation ({{TASK:1.1}} Инициализировать index.html и game.js. Настроить Canvas (full screen) и основной цикл requestAnimationFrame.)

@@ -1,0 +1,16 @@
+{
+    "description": "Открыть игру в браузере",
+    "steps": [
+        {
+            "type": "shell",
+            "command": "npx http-server -p 8090",
+            "label": "Запуск веб-сервера"
+        },
+        {
+            "type": "open",
+            "url": "http://localhost:8090",
+            "delay": 2,
+            "label": "Открыть в браузере"
+        }
+    ]
+}

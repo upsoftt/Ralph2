@@ -1,0 +1,10 @@
+{
+    "description": "Открыть ToDo-приложение в браузере",
+    "steps": [
+        {
+            "type": "open",
+            "url": "index.html",
+            "label": "Открыть в браузере"
+        }
+    ]
+}

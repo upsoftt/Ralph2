@@ -1,0 +1,3833 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Мой День</title>
+
+  <!-- Tailwind CSS Play CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+          },
+          backdropBlur: {
+            xs: '2px',
+          },
+          colors: {
+            glass: {
+              light: 'rgba(255, 255, 255, 0.12)',
+              border: 'rgba(255, 255, 255, 0.18)',
+            },
+          },
+          boxShadow: {
+            glass: '0 8px 32px rgba(0, 0, 0, 0.37)',
+            'glass-sm': '0 4px 16px rgba(0, 0, 0, 0.25)',
+          },
+        },
+      },
+    };
+  </script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+    /* CSS Custom Properties — Design System */
+    :root {
+      /* Color Tokens */
+      --color-bg-start: #0f172a;
+      --color-bg-end: #1e293b;
+      --color-accent: #6366f1;
+      --color-accent-hover: #4f46e5;
+      --color-success: #10b981;
+      --color-danger: #ef4444;
+      --color-warning: #f59e0b;
+      --color-text-primary: #f1f5f9;
+      --color-text-secondary: #94a3b8;
+      --color-text-muted: #64748b;
+
+      /* Glass Tokens */
+      --glass-bg: rgba(255, 255, 255, 0.08);
+      --glass-bg-hover: rgba(255, 255, 255, 0.12);
+      --glass-border: rgba(255, 255, 255, 0.15);
+      --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+
+      /* Spacing Scale */
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --radius-xl: 24px;
+
+      /* Transitions */
+      --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
+      --transition-base: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+      --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* Light mode overrides */
+    html:not(.dark) {
+      --color-bg-start: #e2e8f0;
+      --color-bg-end: #cbd5e1;
+      --glass-bg: rgba(255, 255, 255, 0.55);
+      --glass-bg-hover: rgba(255, 255, 255, 0.72);
+      --glass-border: rgba(255, 255, 255, 0.70);
+      --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.12);
+      --color-text-primary: #0f172a;
+      --color-text-secondary: #475569;
+      --color-text-muted: #94a3b8;
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      min-height: 100dvh;
+      background: linear-gradient(135deg, var(--color-bg-start) 0%, var(--color-bg-end) 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 2rem 1rem;
+      color: var(--color-text-primary);
+      transition: background var(--transition-slow);
+    }
+
+    /* Glassmorphism base component */
+    .glass {
+      background: var(--glass-bg);
+      backdrop-filter: blur(16px) saturate(180%);
+      -webkit-backdrop-filter: blur(16px) saturate(180%);
+      border: 1px solid var(--glass-border);
+      box-shadow: var(--glass-shadow);
+    }
+
+    .glass-hover {
+      transition: background var(--transition-fast), transform var(--transition-fast);
+    }
+    .glass-hover:hover {
+      background: var(--glass-bg-hover);
+      transform: translateY(-1px);
+    }
+
+    /* Main app container */
+    #app-container {
+      width: 100%;
+      max-width: 500px;
+      border-radius: var(--radius-xl);
+      padding: 2rem;
+    }
+
+    /* App Header */
+    .app-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 2rem;
+    }
+
+    .app-title {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--color-text-primary);
+      letter-spacing: -0.025em;
+    }
+
+    .app-title-icon {
+      color: var(--color-accent);
+      flex-shrink: 0;
+    }
+
+    .app-subtitle {
+      font-size: 0.8rem;
+      color: var(--color-text-muted);
+      margin-top: 0.125rem;
+    }
+
+    /* Theme Toggle Button */
+    .theme-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: 50%;
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      color: var(--color-text-secondary);
+      cursor: pointer;
+      transition: all var(--transition-fast);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+    .theme-toggle:hover {
+      background: var(--glass-bg-hover);
+      color: var(--color-accent);
+      transform: rotate(20deg) scale(1.05);
+    }
+
+    /* Stats row */
+    .stats-row {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .stat-chip {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.375rem 0.75rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      color: var(--color-text-secondary);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+    }
+
+    .stat-chip .count {
+      font-weight: 700;
+      color: var(--color-accent);
+    }
+
+    /* Decorative ambient blobs */
+    .ambient-blob {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(80px);
+      opacity: 0.15;
+      pointer-events: none;
+      z-index: -1;
+    }
+
+    .blob-1 {
+      width: 400px;
+      height: 400px;
+      background: #6366f1;
+      top: -100px;
+      right: -100px;
+    }
+
+    .blob-2 {
+      width: 300px;
+      height: 300px;
+      background: #06b6d4;
+      bottom: 0;
+      left: -80px;
+    }
+
+    /* ── Filter Tabs ────────────────────────────────────────────────────── */
+    .filter-tabs {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 1.25rem;
+      background: var(--glass-bg);
+      border: 1px solid var(--glass-border);
+      border-radius: var(--radius-lg);
+      padding: 0.3rem;
+    }
+
+    .filter-tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.5rem 0.25rem 0.45rem;
+      border-radius: calc(var(--radius-lg) - 4px);
+      border: none;
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.75rem;
+      font-weight: 500;
+      letter-spacing: 0.01em;
+      transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+      user-select: none;
+      position: relative;
+    }
+
+    .filter-tab:hover {
+      background: var(--glass-bg-hover);
+      color: var(--color-text-secondary);
+    }
+
+    .filter-tab.active {
+      background: var(--color-accent);
+      color: #fff;
+      box-shadow: 0 2px 12px rgba(99, 102, 241, 0.45);
+    }
+
+    .filter-tab.active:hover {
+      background: var(--color-accent-hover);
+    }
+
+    /* Badge count above each tab */
+    .tab-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 1.35rem;
+      height: 1.35rem;
+      padding: 0 0.35rem;
+      border-radius: 999px;
+      font-size: 0.65rem;
+      font-weight: 700;
+      line-height: 1;
+      background: rgba(255,255,255,0.15);
+      color: inherit;
+      transition: background var(--transition-fast);
+    }
+
+    .filter-tab.active .tab-badge {
+      background: rgba(255,255,255,0.25);
+    }
+
+    .tab-label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+
+    /* ── Input Area ─────────────────────────────────────────────────────── */
+    .input-area {
+      display: flex;
+      gap: 0.625rem;
+      margin-bottom: 1rem;
+    }
+
+    .todo-input {
+      flex: 1;
+      height: 2.75rem;
+      padding: 0 1rem;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      color: var(--color-text-primary);
+      font-family: 'Inter', system-ui, sans-serif;
+      font-size: 0.9rem;
+      font-weight: 400;
+      outline: none;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      transition:
+        border-color var(--transition-fast),
+        box-shadow var(--transition-fast),
+        background var(--transition-fast);
+    }
+
+    .todo-input::placeholder {
+      color: var(--color-text-muted);
+    }
+
+    .todo-input:focus {
+      border-color: var(--color-accent);
+      background: var(--glass-bg-hover);
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.18), 0 2px 8px rgba(0,0,0,0.15);
+    }
+
+    .add-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.75rem;
+      height: 2.75rem;
+      flex-shrink: 0;
+      border-radius: var(--radius-lg);
+      border: none;
+      background: var(--color-accent);
+      color: #fff;
+      cursor: pointer;
+      font-size: 1.25rem;
+      box-shadow: 0 2px 12px rgba(99,102,241,0.4);
+      transition:
+        background var(--transition-fast),
+        transform var(--transition-fast),
+        box-shadow var(--transition-fast);
+    }
+
+    .add-btn:hover {
+      background: var(--color-accent-hover);
+      transform: scale(1.07);
+      box-shadow: 0 4px 18px rgba(99,102,241,0.55);
+    }
+
+    .add-btn:active {
+      transform: scale(0.96);
+    }
+
+    /* ── Todo List container ─────────────────────────────────────────────── */
+    #todo-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      min-height: 80px;
+    }
+
+    .todo-empty {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      min-height: 100px;
+      color: var(--color-text-muted);
+      font-size: 0.85rem;
+    }
+
+    .todo-empty svg {
+      opacity: 0.4;
+    }
+
+    /* ── Todo Item ───────────────────────────────────────────────────────── */
+    .todo-item {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      padding: 0.75rem 0.875rem;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      transition:
+        background var(--transition-fast),
+        box-shadow var(--transition-fast),
+        opacity var(--transition-fast),
+        transform var(--transition-fast);
+      cursor: default;
+      user-select: none;
+    }
+
+    .todo-item:hover {
+      background: var(--glass-bg-hover);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+      transform: translateY(-1px);
+    }
+
+    .todo-item.done .task-text {
+      text-decoration: line-through;
+      color: var(--color-text-muted);
+    }
+
+    /* Drag handle */
+    .drag-handle {
+      display: flex;
+      align-items: center;
+      color: var(--color-text-muted);
+      cursor: grab;
+      flex-shrink: 0;
+      padding: 0 2px;
+      opacity: 0;
+      transition: opacity var(--transition-fast);
+    }
+
+    .todo-item:hover .drag-handle {
+      opacity: 1;
+    }
+
+    .drag-handle:active {
+      cursor: grabbing;
+    }
+
+    /* Task icon (emoji) */
+    .task-icon {
+      font-size: 1.1rem;
+      flex-shrink: 0;
+      min-width: 1.4rem;
+      text-align: center;
+      line-height: 1;
+    }
+
+    /* Task text */
+    .task-text {
+      flex: 1;
+      font-size: 0.9rem;
+      font-weight: 400;
+      color: var(--color-text-primary);
+      word-break: break-word;
+      transition: color var(--transition-fast);
+    }
+
+    /* Action buttons slot */
+    .task-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      flex-shrink: 0;
+      opacity: 0;
+      transition: opacity var(--transition-fast);
+    }
+
+    .todo-item:hover .task-actions {
+      opacity: 1;
+    }
+
+    /* Toggle & Delete action buttons */
+    .task-action-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 6px;
+      border: none;
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      transition: background var(--transition-fast), color var(--transition-fast), transform var(--transition-fast);
+    }
+    .task-action-btn:hover {
+      transform: scale(1.12);
+    }
+    .task-action-btn.toggle-btn:hover {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--color-success);
+    }
+    .task-action-btn.delete-btn:hover {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--color-danger);
+    }
+
+    /* ── Micro-animations (Task 4.1) ──────────────────────────────────── */
+
+    /* Appear animation for new tasks */
+    @keyframes taskAppear {
+      0%   { opacity: 0; transform: translateY(-8px) scale(0.96); max-height: 0; }
+      60%  { opacity: 1; transform: translateY(2px) scale(1.01); }
+      100% { opacity: 1; transform: translateY(0) scale(1); max-height: 80px; }
+    }
+    .todo-item.appearing {
+      animation: taskAppear 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    }
+
+    /* Remove animation */
+    @keyframes taskRemove {
+      0%   { opacity: 1; transform: translateX(0) scale(1); max-height: 80px; }
+      50%  { opacity: 0.3; transform: translateX(24px) scale(0.97); }
+      100% { opacity: 0; transform: translateX(48px) scale(0.94); max-height: 0; padding: 0; margin: 0; border-width: 0; }
+    }
+    .todo-item.removing {
+      animation: taskRemove 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+      pointer-events: none;
+      overflow: hidden;
+    }
+
+    /* Toggle done — strikethrough sweep + icon morph */
+    @keyframes togglePulse {
+      0%   { transform: scale(1); }
+      50%  { transform: scale(0.95); opacity: 0.7; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .todo-item.toggling {
+      animation: togglePulse 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    /* FLIP layout shift — applied via Web Animations API in JS */
+    .todo-item.flipping {
+      z-index: 1;
+    }
+
+    /* Subtask appear */
+    @keyframes subtaskAppear {
+      0%   { opacity: 0; transform: translateX(-6px); max-height: 0; }
+      100% { opacity: 1; transform: translateX(0); max-height: 60px; }
+    }
+    .subtask-item.appearing {
+      animation: subtaskAppear 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    }
+
+    /* Group card appear */
+    @keyframes groupAppear {
+      0%   { opacity: 0; transform: scale(0.95) translateY(-6px); }
+      100% { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    .group-card.appearing {
+      animation: groupAppear 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    }
+
+    /* Checkbox check animation for subtasks */
+    @keyframes checkPop {
+      0%   { transform: scale(1); }
+      40%  { transform: scale(0.8); }
+      70%  { transform: scale(1.2); }
+      100% { transform: scale(1); }
+    }
+    .subtask-check.popping {
+      animation: checkPop 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    }
+
+    /* ── Drag & Drop States ──────────────────────────────────────────────── */
+    .todo-item.dragging {
+      opacity: 0.4;
+      box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+      transform: scale(0.98);
+      border-color: var(--color-accent);
+      background: var(--glass-bg-hover);
+    }
+
+    /* Drop indicator line between items */
+    .drop-indicator {
+      height: 2px;
+      border-radius: 1px;
+      background: var(--color-accent);
+      box-shadow: 0 0 8px rgba(99,102,241,0.6);
+      margin: -2px 0;
+      transition: opacity 0.1s;
+      pointer-events: none;
+    }
+
+    /* Over zone highlight */
+    .todo-item.drag-over-top {
+      border-top: 2px solid var(--color-accent);
+      margin-top: -1px;
+    }
+
+    .todo-item.drag-over-bottom {
+      border-bottom: 2px solid var(--color-accent);
+      margin-bottom: -1px;
+    }
+
+    /* ── Emoji Trigger Button (in input area) ───────────────────────────── */
+    .emoji-trigger-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.75rem;
+      height: 2.75rem;
+      flex-shrink: 0;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      cursor: pointer;
+      font-size: 1.15rem;
+      transition: background var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      user-select: none;
+    }
+    .emoji-trigger-btn:hover {
+      background: var(--glass-bg-hover);
+      border-color: var(--color-accent);
+      transform: scale(1.05);
+    }
+    .emoji-trigger-btn.has-emoji {
+      border-color: var(--color-accent);
+    }
+
+    /* Clickable task icon */
+    .task-icon {
+      cursor: pointer;
+      transition: transform var(--transition-fast), opacity var(--transition-fast);
+      border-radius: 4px;
+      padding: 1px 2px;
+    }
+    .task-icon:hover {
+      transform: scale(1.25);
+      opacity: 0.85;
+    }
+
+    /* ── Emoji Picker Popup ──────────────────────────────────────────────── */
+    .emoji-picker {
+      position: fixed;
+      z-index: 9999;
+      width: 288px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--glass-border);
+      background: var(--color-bg-end);
+      box-shadow: 0 16px 48px rgba(0,0,0,0.55);
+      overflow: hidden;
+      display: none;
+      flex-direction: column;
+    }
+
+    html:not(.dark) .emoji-picker {
+      background: #f8fafc;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.18);
+    }
+
+    .emoji-picker.open {
+      display: flex;
+      animation: pickerIn 0.18s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    }
+
+    @keyframes pickerIn {
+      from { opacity: 0; transform: scale(0.9) translateY(-6px); }
+      to   { opacity: 1; transform: scale(1) translateY(0); }
+    }
+
+    /* Search */
+    .picker-search-wrap {
+      padding: 0.625rem 0.625rem 0.375rem;
+      border-bottom: 1px solid var(--glass-border);
+    }
+    .picker-search {
+      width: 100%;
+      padding: 0.45rem 0.75rem;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      color: var(--color-text-primary);
+      font-family: inherit;
+      font-size: 0.82rem;
+      outline: none;
+      transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+    }
+    .picker-search::placeholder { color: var(--color-text-muted); }
+    .picker-search:focus {
+      border-color: var(--color-accent);
+      box-shadow: 0 0 0 2px rgba(99,102,241,0.2);
+    }
+
+    /* Category pills */
+    .picker-cats {
+      display: flex;
+      gap: 0.25rem;
+      padding: 0.375rem 0.625rem;
+      overflow-x: auto;
+      scrollbar-width: none;
+      border-bottom: 1px solid var(--glass-border);
+    }
+    .picker-cats::-webkit-scrollbar { display: none; }
+
+    .picker-cat-btn {
+      flex-shrink: 0;
+      padding: 0.2rem 0.45rem;
+      border-radius: 999px;
+      border: none;
+      background: transparent;
+      color: var(--color-text-muted);
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: background var(--transition-fast), transform var(--transition-fast);
+    }
+    .picker-cat-btn:hover { background: var(--glass-bg-hover); transform: scale(1.15); }
+    .picker-cat-btn.active {
+      background: var(--color-accent);
+      box-shadow: 0 2px 8px rgba(99,102,241,0.35);
+    }
+
+    /* Emoji grid */
+    .picker-grid-wrap {
+      padding: 0.5rem 0.5rem 0.4rem;
+      max-height: 210px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--glass-border) transparent;
+    }
+
+    .picker-section-label {
+      font-size: 0.65rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--color-text-muted);
+      padding: 0.3rem 0.25rem 0.15rem;
+    }
+
+    .picker-grid {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 1px;
+    }
+
+    .picker-emoji {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      font-size: 1.1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      transition: background var(--transition-fast), transform var(--transition-fast);
+      line-height: 1;
+    }
+    .picker-emoji:hover,
+    .picker-emoji:focus {
+      background: var(--glass-bg-hover);
+      transform: scale(1.22);
+      outline: 2px solid var(--color-accent);
+      outline-offset: 1px;
+      z-index: 1;
+      position: relative;
+    }
+    .picker-emoji.selected {
+      background: rgba(99,102,241,0.25);
+      outline: 2px solid var(--color-accent);
+    }
+
+    /* Footer */
+    .picker-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.375rem 0.625rem;
+      border-top: 1px solid var(--glass-border);
+    }
+    .picker-clear-btn {
+      font-size: 0.72rem;
+      color: var(--color-text-muted);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0.2rem 0.4rem;
+      border-radius: 4px;
+      transition: color var(--transition-fast), background var(--transition-fast);
+    }
+    .picker-clear-btn:hover { color: var(--color-danger); background: rgba(239,68,68,0.08); }
+
+    .picker-preview {
+      font-size: 1.4rem;
+      min-width: 2rem;
+      text-align: center;
+    }
+
+    /* ── Input Validation States ────────────────────────────────────────── */
+    @keyframes shake {
+      0%, 100% { transform: translateX(0); }
+      15%       { transform: translateX(-6px); }
+      35%       { transform: translateX(6px); }
+      55%       { transform: translateX(-4px); }
+      75%       { transform: translateX(4px); }
+      90%       { transform: translateX(-2px); }
+    }
+
+    @keyframes inputClear {
+      0%   { opacity: 1; transform: scaleX(1); }
+      40%  { opacity: 0.3; transform: scaleX(0.97); }
+      100% { opacity: 1; transform: scaleX(1); }
+    }
+
+    @keyframes addBtnPop {
+      0%   { transform: scale(1); }
+      40%  { transform: scale(0.88); }
+      70%  { transform: scale(1.12); }
+      100% { transform: scale(1); }
+    }
+
+    .todo-input.input-error {
+      border-color: var(--color-danger) !important;
+      box-shadow: 0 0 0 3px rgba(239,68,68,0.18), 0 2px 8px rgba(0,0,0,0.15) !important;
+      animation: shake 0.38s cubic-bezier(0.36, 0.07, 0.19, 0.97) both;
+    }
+
+    .todo-input.input-success {
+      animation: inputClear 0.3s ease both;
+    }
+
+    .add-btn.btn-pop {
+      animation: addBtnPop 0.3s ease both;
+    }
+
+    /* Hint text under input */
+    .input-hint {
+      font-size: 0.72rem;
+      color: var(--color-danger);
+      margin-top: -0.6rem;
+      margin-bottom: 0.75rem;
+      margin-left: 0.25rem;
+      min-height: 1rem;
+      opacity: 0;
+      transform: translateY(-4px);
+      transition: opacity var(--transition-fast), transform var(--transition-fast);
+    }
+
+    .input-hint.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Add button disabled state */
+    .add-btn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none !important;
+      box-shadow: none !important;
+    }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 4px;
+    }
+    ::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--glass-border);
+      border-radius: 2px;
+    }
+
+    /* ── Undo Toast ────────────────────────────────────────────────────── */
+    .undo-toast {
+      position: fixed;
+      bottom: 2rem;
+      left: 50%;
+      transform: translateX(-50%) translateY(120%);
+      z-index: 9998;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem 1.25rem;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--glass-border);
+      background: var(--color-bg-end);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+      font-size: 0.85rem;
+      color: var(--color-text-primary);
+      opacity: 0;
+      transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease;
+      pointer-events: none;
+    }
+    html:not(.dark) .undo-toast {
+      background: #f8fafc;
+      box-shadow: 0 12px 40px rgba(0,0,0,0.14);
+    }
+    .undo-toast.visible {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .undo-toast-text {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 200px;
+    }
+    .undo-toast-btn {
+      font-family: inherit;
+      font-size: 0.78rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-accent);
+      background: none;
+      border: none;
+      cursor: pointer;
+      padding: 0.25rem 0.5rem;
+      border-radius: 6px;
+      transition: background var(--transition-fast), color var(--transition-fast);
+      white-space: nowrap;
+    }
+    .undo-toast-btn:hover {
+      background: rgba(99,102,241,0.12);
+      color: var(--color-accent-hover);
+    }
+    .undo-toast-progress {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      height: 3px;
+      border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+      background: var(--color-accent);
+      transition: width linear;
+    }
+
+    /* ── Task Groups ───────────────────────────────────────────────────── */
+    .create-group-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      width: 100%;
+      padding: 0.6rem 1rem;
+      margin-top: 0.75rem;
+      border-radius: var(--radius-md);
+      border: 1px dashed var(--glass-border);
+      background: transparent;
+      color: var(--color-text-muted);
+      font-family: inherit;
+      font-size: 0.8rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
+    }
+    .create-group-btn:hover {
+      background: var(--glass-bg);
+      color: var(--color-accent);
+      border-color: var(--color-accent);
+    }
+
+    /* Group Card */
+    .group-card {
+      border-radius: var(--radius-md);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      overflow: hidden;
+      transition: box-shadow var(--transition-fast), background var(--transition-fast);
+    }
+    .group-card:hover {
+      background: var(--glass-bg-hover);
+    }
+
+    .group-header {
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      padding: 0.75rem 0.875rem;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .group-chevron {
+      display: flex;
+      align-items: center;
+      color: var(--color-text-muted);
+      transition: transform var(--transition-fast);
+      flex-shrink: 0;
+    }
+    .group-card.collapsed .group-chevron {
+      transform: rotate(-90deg);
+    }
+
+    .group-icon {
+      font-size: 1.1rem;
+      flex-shrink: 0;
+      min-width: 1.4rem;
+      text-align: center;
+      line-height: 1;
+      cursor: pointer;
+      transition: transform var(--transition-fast);
+      border-radius: 4px;
+      padding: 1px 2px;
+    }
+    .group-icon:hover {
+      transform: scale(1.25);
+    }
+
+    .group-title {
+      flex: 1;
+      font-size: 0.9rem;
+      font-weight: 600;
+      color: var(--color-text-primary);
+      word-break: break-word;
+    }
+
+    .group-progress-info {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.7rem;
+      font-weight: 500;
+      color: var(--color-text-muted);
+      flex-shrink: 0;
+    }
+
+    .group-progress-bar {
+      width: 48px;
+      height: 4px;
+      border-radius: 2px;
+      background: rgba(255,255,255,0.1);
+      overflow: hidden;
+    }
+    html:not(.dark) .group-progress-bar {
+      background: rgba(0,0,0,0.08);
+    }
+
+    .group-progress-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: var(--color-accent);
+      transition: width var(--transition-base);
+    }
+    .group-progress-fill.complete {
+      background: var(--color-success);
+    }
+
+    .group-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      flex-shrink: 0;
+      opacity: 0;
+      transition: opacity var(--transition-fast);
+    }
+    .group-header:hover .group-actions {
+      opacity: 1;
+    }
+
+    /* Group Body */
+    .group-body {
+      border-top: 1px solid var(--glass-border);
+      padding: 0.5rem 0.75rem 0.75rem;
+      max-height: 600px;
+      overflow: hidden;
+      transition: max-height var(--transition-base), padding var(--transition-base), opacity var(--transition-base);
+    }
+    .group-card.collapsed .group-body {
+      max-height: 0;
+      padding: 0 0.75rem;
+      opacity: 0;
+      border-top-color: transparent;
+    }
+
+    /* Subtask list */
+    .subtask-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .subtask-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.5rem;
+      border-radius: var(--radius-sm);
+      transition: background var(--transition-fast);
+    }
+    .subtask-item:hover {
+      background: var(--glass-bg-hover);
+    }
+
+    .subtask-check {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.25rem;
+      height: 1.25rem;
+      border-radius: 50%;
+      border: 1.5px solid var(--color-text-muted);
+      background: transparent;
+      color: transparent;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all var(--transition-fast);
+      padding: 0;
+    }
+    .subtask-check:hover {
+      border-color: var(--color-success);
+      color: var(--color-success);
+    }
+    .subtask-item.done .subtask-check {
+      background: var(--color-success);
+      border-color: var(--color-success);
+      color: #fff;
+    }
+
+    .subtask-text {
+      flex: 1;
+      font-size: 0.82rem;
+      color: var(--color-text-primary);
+      word-break: break-word;
+      transition: color var(--transition-fast);
+    }
+    .subtask-item.done .subtask-text {
+      text-decoration: line-through;
+      color: var(--color-text-muted);
+    }
+
+    .subtask-delete {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.35rem;
+      height: 1.35rem;
+      border-radius: 4px;
+      border: none;
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      flex-shrink: 0;
+      opacity: 0;
+      transition: all var(--transition-fast);
+      padding: 0;
+    }
+    .subtask-item:hover .subtask-delete {
+      opacity: 1;
+    }
+    .subtask-delete:hover {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--color-danger);
+    }
+
+    /* Subtask input */
+    .subtask-input-row {
+      display: flex;
+      gap: 0.4rem;
+    }
+    .subtask-input {
+      flex: 1;
+      height: 2rem;
+      padding: 0 0.6rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      color: var(--color-text-primary);
+      font-family: inherit;
+      font-size: 0.78rem;
+      outline: none;
+      transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+    }
+    .subtask-input::placeholder { color: var(--color-text-muted); }
+    .subtask-input:focus {
+      border-color: var(--color-accent);
+      box-shadow: 0 0 0 2px rgba(99,102,241,0.15);
+    }
+    .subtask-add-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      flex-shrink: 0;
+      border-radius: var(--radius-sm);
+      border: none;
+      background: var(--color-accent);
+      color: #fff;
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: background var(--transition-fast), transform var(--transition-fast);
+    }
+    .subtask-add-btn:hover {
+      background: var(--color-accent-hover);
+      transform: scale(1.05);
+    }
+
+    .group-empty-hint {
+      text-align: center;
+      font-size: 0.75rem;
+      color: var(--color-text-muted);
+      padding: 0.5rem 0;
+    }
+
+    /* Group remove animation */
+    .group-card.removing {
+      animation: taskRemove 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+      pointer-events: none;
+      overflow: hidden;
+    }
+    .subtask-item.removing {
+      animation: taskRemove 0.3s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+      pointer-events: none;
+      overflow: hidden;
+    }
+
+    /* ── Group Create Modal ────────────────────────────────────────────── */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9990;
+      background: rgba(0,0,0,0.5);
+      backdrop-filter: blur(4px);
+      -webkit-backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+    }
+    .modal-overlay.open {
+      display: flex;
+      animation: modalFadeIn 0.2s ease both;
+    }
+    @keyframes modalFadeIn {
+      from { opacity: 0; }
+      to   { opacity: 1; }
+    }
+
+    .modal-card {
+      width: 100%;
+      max-width: 380px;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--glass-border);
+      background: var(--color-bg-end);
+      box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+      animation: pickerIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+    }
+    html:not(.dark) .modal-card {
+      background: #f8fafc;
+      box-shadow: 0 16px 48px rgba(0,0,0,0.15);
+    }
+
+    .modal-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem 1.25rem 0.75rem;
+    }
+    .modal-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--color-text-primary);
+    }
+    .modal-close {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 50%;
+      border: none;
+      background: transparent;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      font-size: 1.1rem;
+      transition: background var(--transition-fast), color var(--transition-fast);
+    }
+    .modal-close:hover {
+      background: var(--glass-bg-hover);
+      color: var(--color-text-primary);
+    }
+
+    .modal-body {
+      padding: 0 1.25rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .modal-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--color-text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.25rem;
+    }
+
+    .modal-input {
+      width: 100%;
+      height: 2.5rem;
+      padding: 0 0.875rem;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      color: var(--color-text-primary);
+      font-family: inherit;
+      font-size: 0.88rem;
+      outline: none;
+      transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+    }
+    .modal-input::placeholder { color: var(--color-text-muted); }
+    .modal-input:focus {
+      border-color: var(--color-accent);
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.15);
+    }
+
+    .modal-emoji-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .modal-emoji-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      font-size: 1.2rem;
+      cursor: pointer;
+      transition: border-color var(--transition-fast), transform var(--transition-fast);
+    }
+    .modal-emoji-btn:hover {
+      border-color: var(--color-accent);
+      transform: scale(1.08);
+    }
+
+    .modal-footer {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+      padding: 0 1.25rem 1rem;
+    }
+    .modal-btn {
+      padding: 0.5rem 1.25rem;
+      border-radius: var(--radius-md);
+      border: none;
+      font-family: inherit;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background var(--transition-fast), transform var(--transition-fast);
+    }
+    .modal-btn-cancel {
+      background: var(--glass-bg);
+      color: var(--color-text-secondary);
+    }
+    .modal-btn-cancel:hover {
+      background: var(--glass-bg-hover);
+    }
+    .modal-btn-submit {
+      background: var(--color-accent);
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(99,102,241,0.3);
+    }
+    .modal-btn-submit:hover {
+      background: var(--color-accent-hover);
+      transform: scale(1.03);
+    }
+
+    /* ── Storage Alert Banner ──────────────────────────────────────────── */
+    .storage-alert {
+      position: fixed;
+      top: 1rem;
+      left: 50%;
+      transform: translateX(-50%) translateY(-120%);
+      z-index: 10000;
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+      padding: 0.75rem 1.25rem;
+      border-radius: var(--radius-lg);
+      border: 1px solid rgba(245, 158, 11, 0.35);
+      background: var(--color-bg-end);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.4);
+      font-size: 0.82rem;
+      color: var(--color-text-primary);
+      max-width: 420px;
+      opacity: 0;
+      transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.25s ease;
+      pointer-events: none;
+    }
+    html:not(.dark) .storage-alert {
+      background: #fffbeb;
+      border-color: rgba(245, 158, 11, 0.4);
+      box-shadow: 0 12px 40px rgba(0,0,0,0.1);
+    }
+    .storage-alert.visible {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .storage-alert-icon {
+      font-size: 1.3rem;
+      flex-shrink: 0;
+    }
+    .storage-alert-text {
+      flex: 1;
+      line-height: 1.4;
+    }
+    .storage-alert-close {
+      flex-shrink: 0;
+      background: none;
+      border: none;
+      color: var(--color-text-muted);
+      cursor: pointer;
+      padding: 0.2rem;
+      border-radius: 4px;
+      font-size: 1.1rem;
+      line-height: 1;
+      transition: color var(--transition-fast), background var(--transition-fast);
+    }
+    .storage-alert-close:hover {
+      color: var(--color-text-primary);
+      background: var(--glass-bg-hover);
+    }
+
+    /* ── Background Image on Task Card (Task 2.5) ──────────────────────── */
+    .todo-item {
+      position: relative;
+      overflow: hidden;
+    }
+    .todo-item.has-bg::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: var(--task-bg);
+      background-size: cover;
+      background-position: center;
+      border-radius: inherit;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .dark .todo-item.has-bg::before {
+      opacity: 0.2;
+    }
+    html:not(.dark) .todo-item.has-bg::before {
+      opacity: 0.18;
+    }
+    /* Overlay for text readability */
+    .todo-item.has-bg::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .dark .todo-item.has-bg::after {
+      background: rgba(0,0,0,0.35);
+    }
+    html:not(.dark) .todo-item.has-bg::after {
+      background: rgba(255,255,255,0.45);
+    }
+    .todo-item.has-bg > * {
+      position: relative;
+      z-index: 1;
+    }
+
+    /* Background Image button in task actions */
+    .task-action-btn.bg-btn:hover {
+      color: var(--color-accent);
+    }
+
+    /* ── Background Image Picker Modal (Task 2.5) ────────────────────── */
+    .bg-picker-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0,0,0,0.5);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity var(--transition-base);
+    }
+    .bg-picker-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .bg-picker-card {
+      width: 90%;
+      max-width: 420px;
+      max-height: 80vh;
+      overflow-y: auto;
+      border-radius: var(--radius-xl);
+      background: var(--color-bg-end);
+      border: 1px solid var(--glass-border);
+      box-shadow: 0 24px 64px rgba(0,0,0,0.5);
+      transform: scale(0.92);
+      transition: transform var(--transition-base);
+    }
+    html:not(.dark) .bg-picker-card {
+      background: #f1f5f9;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.15);
+    }
+    .bg-picker-overlay.open .bg-picker-card {
+      transform: scale(1);
+    }
+    .bg-picker-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem 1.25rem 0.75rem;
+    }
+    .bg-picker-title {
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--color-text-primary);
+    }
+    .bg-picker-body {
+      padding: 0 1.25rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .bg-picker-section-label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--color-text-muted);
+      margin-bottom: 0.4rem;
+    }
+    /* Upload area */
+    .bg-upload-area {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 1rem;
+      border: 2px dashed var(--glass-border);
+      border-radius: var(--radius-md);
+      cursor: pointer;
+      transition: border-color var(--transition-fast), background var(--transition-fast);
+    }
+    .bg-upload-area:hover {
+      border-color: var(--color-accent);
+      background: var(--glass-bg);
+    }
+    .bg-upload-area svg {
+      color: var(--color-text-muted);
+    }
+    .bg-upload-text {
+      font-size: 0.78rem;
+      color: var(--color-text-muted);
+    }
+    .bg-upload-preview {
+      width: 100%;
+      max-height: 120px;
+      object-fit: contain;
+      border-radius: var(--radius-sm);
+      display: none;
+    }
+    .bg-upload-preview.visible {
+      display: block;
+    }
+    .bg-size-warning {
+      font-size: 0.72rem;
+      color: var(--color-warning);
+      display: none;
+    }
+    .bg-size-warning.visible {
+      display: block;
+    }
+    /* Preset grid */
+    .bg-preset-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 0.5rem;
+    }
+    .bg-preset-item {
+      aspect-ratio: 4/3;
+      border-radius: var(--radius-sm);
+      border: 2px solid transparent;
+      cursor: pointer;
+      transition: border-color var(--transition-fast), transform var(--transition-fast);
+      position: relative;
+      overflow: hidden;
+    }
+    .bg-preset-item:hover {
+      transform: scale(1.06);
+      border-color: var(--color-text-muted);
+    }
+    .bg-preset-item.selected {
+      border-color: var(--color-accent);
+      box-shadow: 0 0 0 2px rgba(99,102,241,0.3);
+    }
+    .bg-picker-footer {
+      display: flex;
+      justify-content: space-between;
+      padding: 0 1.25rem 1rem;
+      gap: 0.5rem;
+    }
+
+    /* ── Accessibility & Focus (Task 4.2) ──────────────────────────────── */
+
+    /* Universal focus-visible ring for keyboard navigation */
+    :focus-visible {
+      outline: 2px solid var(--color-accent);
+      outline-offset: 2px;
+      border-radius: var(--radius-sm);
+    }
+
+    /* Remove default outline for mouse users */
+    :focus:not(:focus-visible) {
+      outline: none;
+    }
+
+    /* Focusable todo item */
+    .todo-item:focus-visible {
+      outline: 2px solid var(--color-accent);
+      outline-offset: -1px;
+      background: var(--glass-bg-hover);
+      box-shadow: 0 0 0 3px rgba(99,102,241,0.18);
+    }
+    .todo-item:focus-visible .task-actions,
+    .todo-item:focus-visible .drag-handle {
+      opacity: 1;
+    }
+
+    /* Focusable subtask item */
+    .subtask-item:focus-visible {
+      outline: 2px solid var(--color-accent);
+      outline-offset: -1px;
+      background: var(--glass-bg-hover);
+    }
+    .subtask-item:focus-visible .subtask-delete {
+      opacity: 1;
+    }
+
+    /* Skip link (hidden until focused) */
+    .skip-link {
+      position: fixed;
+      top: -100%;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10001;
+      padding: 0.5rem 1.5rem;
+      border-radius: var(--radius-md);
+      background: var(--color-accent);
+      color: #fff;
+      font-family: inherit;
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: top var(--transition-fast);
+    }
+    .skip-link:focus {
+      top: 1rem;
+    }
+
+    /* Hotkey hint tooltip */
+    .hotkey-hint {
+      position: fixed;
+      bottom: 1rem;
+      right: 1rem;
+      z-index: 9997;
+      padding: 0.4rem 0.75rem;
+      border-radius: var(--radius-sm);
+      background: var(--color-bg-end);
+      border: 1px solid var(--glass-border);
+      color: var(--color-text-muted);
+      font-size: 0.7rem;
+      opacity: 0;
+      transform: translateY(4px);
+      transition: opacity var(--transition-fast), transform var(--transition-fast);
+      pointer-events: none;
+    }
+    .hotkey-hint.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .hotkey-hint kbd {
+      display: inline-block;
+      padding: 0.1rem 0.35rem;
+      margin: 0 0.15rem;
+      border-radius: 3px;
+      border: 1px solid var(--glass-border);
+      background: var(--glass-bg);
+      font-family: inherit;
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: var(--color-text-secondary);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Skip link for keyboard users (Task 4.2) -->
+  <a href="#todo-input" class="skip-link">Перейти к вводу задач</a>
+
+  <!-- Ambient background blobs -->
+  <div class="ambient-blob blob-1"></div>
+  <div class="ambient-blob blob-2"></div>
+
+  <!-- Main App Container -->
+  <main id="app-container" class="glass">
+
+    <!-- Header -->
+    <header class="app-header">
+      <div>
+        <h1 class="app-title">
+          <i data-lucide="calendar-days" class="app-title-icon" width="28" height="28"></i>
+          Мой День
+        </h1>
+        <p class="app-subtitle" id="app-date"></p>
+      </div>
+      <button class="theme-toggle" id="theme-toggle" aria-label="Переключить тему" title="Переключить тему">
+        <i data-lucide="sun" width="18" height="18" id="theme-icon"></i>
+      </button>
+    </header>
+
+    <!-- Stats -->
+    <div class="stats-row" id="stats-row">
+      <span class="stat-chip">
+        <i data-lucide="list" width="13" height="13"></i>
+        Всего: <span class="count" id="stat-total">0</span>
+      </span>
+      <span class="stat-chip">
+        <i data-lucide="circle" width="13" height="13"></i>
+        Активных: <span class="count" id="stat-active">0</span>
+      </span>
+      <span class="stat-chip">
+        <i data-lucide="check-circle-2" width="13" height="13"></i>
+        Готово: <span class="count" id="stat-done">0</span>
+      </span>
+    </div>
+
+    <!-- Filter Tabs -->
+    <div class="filter-tabs" role="tablist" aria-label="Фильтр задач">
+      <button class="filter-tab active" data-filter="all" role="tab" aria-selected="true" aria-controls="todo-list">
+        <span class="tab-badge" id="badge-all">0</span>
+        <span class="tab-label">Все</span>
+      </button>
+      <button class="filter-tab" data-filter="active" role="tab" aria-selected="false" aria-controls="todo-list">
+        <span class="tab-badge" id="badge-active">0</span>
+        <span class="tab-label">Активные</span>
+      </button>
+      <button class="filter-tab" data-filter="done" role="tab" aria-selected="false" aria-controls="todo-list">
+        <span class="tab-badge" id="badge-done">0</span>
+        <span class="tab-label">Готово</span>
+      </button>
+    </div>
+
+    <!-- Input Area -->
+    <div class="input-area">
+      <button class="emoji-trigger-btn" id="input-emoji-btn" aria-label="Выбрать эмодзи" title="Выбрать эмодзи для задачи">😊</button>
+      <input
+        type="text"
+        id="todo-input"
+        class="todo-input"
+        placeholder="Добавить задачу..."
+        maxlength="200"
+        autocomplete="off"
+        aria-label="Новая задача"
+      />
+      <button class="add-btn" id="add-btn" aria-label="Добавить задачу" title="Добавить (Enter)">
+        <i data-lucide="plus" width="20" height="20"></i>
+      </button>
+    </div>
+
+    <!-- Validation hint -->
+    <div class="input-hint" id="input-hint" aria-live="polite"></div>
+
+    <!-- Emoji Picker Popup (shared for input & task icons) -->
+    <div class="emoji-picker" id="emoji-picker" role="dialog" aria-label="Выбор эмодзи">
+      <div class="picker-search-wrap">
+        <input class="picker-search" id="picker-search" type="text" placeholder="Поиск эмодзи..." autocomplete="off" />
+      </div>
+      <div class="picker-cats" id="picker-cats" role="tablist"></div>
+      <div class="picker-grid-wrap" id="picker-grid-wrap"></div>
+      <div class="picker-footer">
+        <button class="picker-clear-btn" id="picker-clear-btn">Сбросить</button>
+        <span class="picker-preview" id="picker-preview"></span>
+      </div>
+    </div>
+
+    <!-- Todo List -->
+    <div id="todo-list" role="list" aria-label="Список задач">
+      <!-- Задачи рендерятся через JS -->
+    </div>
+
+    <!-- Task Groups -->
+    <div id="group-list" aria-label="Группы задач">
+      <!-- Группы рендерятся через JS -->
+    </div>
+
+    <!-- Create Group Button -->
+    <button class="create-group-btn" id="create-group-btn" aria-label="Создать группу">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        <line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/>
+      </svg>
+      Создать группу
+    </button>
+
+  </main>
+
+  <!-- Hotkey hint (Task 4.2) -->
+  <div class="hotkey-hint" id="hotkey-hint" aria-hidden="true"></div>
+
+  <!-- Group Create Modal -->
+  <div class="modal-overlay" id="group-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="modal-title">Новая группа</span>
+        <button class="modal-close" id="group-modal-close" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="modal-body">
+        <div>
+          <div class="modal-label">Название</div>
+          <input class="modal-input" id="group-title-input" type="text" placeholder="Например: Сбор в отпуск" maxlength="100" autocomplete="off" />
+        </div>
+        <div>
+          <div class="modal-label">Иконка</div>
+          <div class="modal-emoji-row">
+            <button class="modal-emoji-btn" id="group-emoji-btn" type="button">📁</button>
+            <span style="font-size:0.75rem;color:var(--color-text-muted);">Нажмите, чтобы выбрать</span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="modal-btn modal-btn-cancel" id="group-modal-cancel">Отмена</button>
+        <button class="modal-btn modal-btn-submit" id="group-modal-submit">Создать</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Background Image Picker Modal (Task 2.5) -->
+  <div class="bg-picker-overlay" id="bg-picker-modal" role="dialog" aria-label="Выбор фонового изображения" aria-modal="true">
+    <div class="bg-picker-card">
+      <div class="bg-picker-header">
+        <span class="bg-picker-title">Фоновое изображение</span>
+        <button class="modal-close" id="bg-picker-close" aria-label="Закрыть">✕</button>
+      </div>
+      <div class="bg-picker-body">
+        <div>
+          <div class="bg-picker-section-label">Загрузить с устройства</div>
+          <div class="bg-upload-area" id="bg-upload-area" tabindex="0" role="button" aria-label="Нажмите для загрузки изображения">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <span class="bg-upload-text">Нажмите или перетащите файл</span>
+            <img class="bg-upload-preview" id="bg-upload-preview" alt="Превью" />
+            <span class="bg-size-warning" id="bg-size-warning">Изображение слишком большое. Применяется дополнительное сжатие...</span>
+          </div>
+          <input type="file" id="bg-file-input" accept="image/*" style="display:none" />
+        </div>
+        <div>
+          <div class="bg-picker-section-label">Готовые пресеты</div>
+          <div class="bg-preset-grid" id="bg-preset-grid"></div>
+        </div>
+      </div>
+      <div class="bg-picker-footer">
+        <button class="modal-btn modal-btn-cancel" id="bg-picker-remove">Убрать фон</button>
+        <button class="modal-btn modal-btn-submit" id="bg-picker-apply">Применить</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Storage Alert -->
+  <div class="storage-alert" id="storage-alert" role="alert">
+    <span class="storage-alert-icon">⚠️</span>
+    <span class="storage-alert-text" id="storage-alert-text"></span>
+    <button class="storage-alert-close" id="storage-alert-close" aria-label="Закрыть">✕</button>
+  </div>
+
+  <!-- Undo Toast -->
+  <div class="undo-toast" id="undo-toast" role="alert" aria-live="assertive">
+    <span class="undo-toast-text" id="undo-toast-text"></span>
+    <button class="undo-toast-btn" id="undo-toast-btn">Отменить</button>
+    <div class="undo-toast-progress" id="undo-toast-progress"></div>
+  </div>
+
+  <script>
+    // ══════════════════════════════════════════════════════════════════════
+    //  REACTIVE STORE — Single source of truth
+    // ══════════════════════════════════════════════════════════════════════
+
+    const STORAGE_KEY = 'todo-app-state';
+
+    // ─── Storage Exception Handler (Task 3.3) ──────────────────────────
+    let storageAvailable = true;
+    let storageAlertShown = false;
+
+    function checkStorageAvailability() {
+      try {
+        const testKey = '__storage_test__';
+        localStorage.setItem(testKey, '1');
+        localStorage.removeItem(testKey);
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function showStorageAlert(message) {
+      if (storageAlertShown) return;
+      storageAlertShown = true;
+      const alertEl   = document.getElementById('storage-alert');
+      const alertText = document.getElementById('storage-alert-text');
+      const alertClose = document.getElementById('storage-alert-close');
+      alertText.textContent = message;
+      alertEl.classList.add('visible');
+      alertClose.addEventListener('click', () => {
+        alertEl.classList.remove('visible');
+      }, { once: true });
+      // Auto-hide after 10 seconds
+      setTimeout(() => alertEl.classList.remove('visible'), 10000);
+    }
+
+    storageAvailable = checkStorageAvailability();
+    if (!storageAvailable) {
+      // Defer alert until DOM is ready
+      requestAnimationFrame(() => {
+        showStorageAlert('Хранилище недоступно (приватный режим?). Задачи не будут сохранены после перезагрузки.');
+      });
+    }
+
+    /**
+     * createStore(initialState)
+     * Returns a reactive store object.
+     * Any call to store.setState(patch) deep-merges the patch,
+     * persists to localStorage, and notifies all subscribers.
+     */
+    function createStore(initialState) {
+      let state = structuredClone(initialState);
+      const subscribers = new Set();
+
+      function persist() {
+        if (!storageAvailable) return;
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        } catch (e) {
+          console.warn('[Store] localStorage write failed:', e);
+          storageAvailable = false;
+          const isQuota = e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014;
+          showStorageAlert(
+            isQuota
+              ? 'Хранилище переполнено. Новые изменения не сохраняются. Попробуйте удалить старые задачи.'
+              : 'Не удалось сохранить данные. Задачи могут быть потеряны при перезагрузке.'
+          );
+        }
+      }
+
+      function notify() {
+        subscribers.forEach(fn => fn(state));
+      }
+
+      return {
+        /** Read-only snapshot of current state */
+        getState() {
+          return structuredClone(state);
+        },
+
+        /**
+         * Merge patch into state, persist, then notify all subscribers.
+         * Accepts an object or an updater function (prevState) => patch.
+         */
+        setState(patchOrUpdater) {
+          const patch = typeof patchOrUpdater === 'function'
+            ? patchOrUpdater(structuredClone(state))
+            : patchOrUpdater;
+
+          state = { ...state, ...patch };
+          persist();
+          notify();
+        },
+
+        /** Subscribe to state changes. Returns unsubscribe function. */
+        subscribe(fn) {
+          subscribers.add(fn);
+          return () => subscribers.delete(fn);
+        },
+      };
+    }
+
+    // ─── Load persisted state or use defaults ─────────────────────────────
+    function loadPersistedState() {
+      if (!storageAvailable) return null;
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === 'object' && Array.isArray(parsed.tasks)) {
+            // Backward compat: ensure groups array exists
+            if (!Array.isArray(parsed.groups)) parsed.groups = [];
+            return parsed;
+          }
+          console.warn('[Store] Invalid data structure in localStorage, resetting.');
+        }
+      } catch (e) {
+        console.warn('[Store] localStorage read failed:', e);
+        requestAnimationFrame(() => {
+          showStorageAlert('Сохранённые данные повреждены и были сброшены.');
+        });
+      }
+      return null;
+    }
+
+    const DEFAULT_STATE = {
+      tasks: [],    // Array<{ id, text, done, icon, backgroundImage, createdAt, order }>
+      groups: [],   // Array<{ id, title, icon, subtasks: Task[], createdAt, collapsed, order }>
+      filter: 'all',  // 'all' | 'active' | 'done'
+      theme: null,    // 'dark' | 'light' | null (null = system)
+    };
+
+    const persisted = loadPersistedState();
+    const store = createStore(persisted ? { ...DEFAULT_STATE, ...persisted } : DEFAULT_STATE);
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  UI RENDERER — Reacts to every store change
+    // ══════════════════════════════════════════════════════════════════════
+
+    function getAllItems(state) {
+      const allSubtasks = (state.groups || []).flatMap(g => g.subtasks || []);
+      return [...state.tasks, ...allSubtasks];
+    }
+
+    function renderStats(state) {
+      const all    = getAllItems(state);
+      const total  = all.length;
+      const done   = all.filter(t => t.done).length;
+      const active = total - done;
+
+      document.getElementById('stat-total').textContent  = total;
+      document.getElementById('stat-active').textContent = active;
+      document.getElementById('stat-done').textContent   = done;
+    }
+
+    // ── Filter Tabs renderer ──────────────────────────────────────────────
+    function renderFilters(state) {
+      const all    = getAllItems(state);
+      const total  = all.length;
+      const done   = all.filter(t => t.done).length;
+      const active = total - done;
+
+      document.getElementById('badge-all').textContent    = total;
+      document.getElementById('badge-active').textContent = active;
+      document.getElementById('badge-done').textContent   = done;
+
+      document.querySelectorAll('.filter-tab').forEach(btn => {
+        const isActive = btn.dataset.filter === state.filter;
+        btn.classList.toggle('active', isActive);
+        btn.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      });
+    }
+
+    // ── Todo List renderer ────────────────────────────────────────────────
+    function getFiltered(tasks, filter) {
+      const sorted = [...tasks].sort((a, b) => a.order - b.order);
+      if (filter === 'active') return sorted.filter(t => !t.done);
+      if (filter === 'done')   return sorted.filter(t => t.done);
+      return sorted;
+    }
+
+    function buildTaskEl(task) {
+      const el = document.createElement('div');
+      el.className = 'todo-item' + (task.done ? ' done' : '') + (task.backgroundImage ? ' has-bg' : '');
+      el.dataset.id = task.id;
+      el.draggable = true;
+      el.tabIndex = 0;
+      el.setAttribute('role', 'listitem');
+      el.setAttribute('aria-label', `${task.done ? 'Выполнено: ' : ''}${task.text}`);
+
+      // Apply background image via ::before
+      if (task.backgroundImage) {
+        const bgCss = resolveBgImage(task.backgroundImage);
+        if (bgCss) {
+          el.style.setProperty('--task-bg', bgCss);
+        }
+      }
+
+      const defaultIcon = task.done ? '✅' : '○';
+      el.innerHTML = `
+        <span class="drag-handle" title="Перетащить" aria-hidden="true">
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+            <circle cx="4" cy="3.5" r="1.2" fill="currentColor"/>
+            <circle cx="4" cy="7" r="1.2" fill="currentColor"/>
+            <circle cx="4" cy="10.5" r="1.2" fill="currentColor"/>
+            <circle cx="10" cy="3.5" r="1.2" fill="currentColor"/>
+            <circle cx="10" cy="7" r="1.2" fill="currentColor"/>
+            <circle cx="10" cy="10.5" r="1.2" fill="currentColor"/>
+          </svg>
+        </span>
+        <span class="task-icon">${task.icon || defaultIcon}</span>
+        <span class="task-text">${escapeHtml(task.text)}</span>
+        <div class="task-actions">
+          <button class="task-action-btn bg-btn" data-action="bg-image" aria-label="Фоновое изображение" title="Фон">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
+            </svg>
+          </button>
+          <button class="task-action-btn toggle-btn" data-action="toggle" aria-label="${task.done ? 'Вернуть задачу' : 'Отметить выполненной'}" title="${task.done ? 'Вернуть' : 'Выполнено'}">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              ${task.done
+                ? '<path d="M3 12h18"/>'
+                : '<polyline points="20 6 9 17 4 12"/>'}
+            </svg>
+          </button>
+          <button class="task-action-btn delete-btn" data-action="delete" aria-label="Удалить задачу" title="Удалить">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+          </button>
+        </div>`;
+      return el;
+    }
+
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // ── FLIP animation helper (Task 4.1) ──────────────────────────────
+    function capturePositions(container) {
+      const positions = new Map();
+      container.querySelectorAll('.todo-item').forEach(el => {
+        positions.set(el.dataset.id, el.getBoundingClientRect());
+      });
+      return positions;
+    }
+
+    function animateFLIP(container, prevPositions) {
+      container.querySelectorAll('.todo-item').forEach(el => {
+        const id = el.dataset.id;
+        const prev = prevPositions.get(id);
+        if (!prev) return; // new item, handled separately
+        const curr = el.getBoundingClientRect();
+        const dy = prev.top - curr.top;
+        if (Math.abs(dy) < 1) return; // no movement
+        el.classList.add('flipping');
+        el.animate([
+          { transform: `translateY(${dy}px)` },
+          { transform: 'translateY(0)' }
+        ], {
+          duration: 280,
+          easing: 'cubic-bezier(0.4, 0, 0.2, 1)',
+        }).onfinish = () => el.classList.remove('flipping');
+      });
+    }
+
+    let _prevTaskIds = []; // track previous render to detect new items
+    let _initialRenderDone = false; // skip appear animation on page load
+
+    function renderList(state) {
+      const list     = document.getElementById('todo-list');
+      const filtered = getFiltered(state.tasks, state.filter);
+
+      if (filtered.length === 0) {
+        _prevTaskIds = [];
+        const labels = { all: 'Задач пока нет', active: 'Нет активных задач', done: 'Нет выполненных задач' };
+        list.innerHTML = `
+          <div class="todo-empty">
+            <i data-lucide="inbox" width="32" height="32"></i>
+            <span>${labels[state.filter]}</span>
+          </div>`;
+        lucide.createIcons();
+        return;
+      }
+
+      // Reconcile DOM: add/remove/reorder only what changed
+      const existingIds = [...list.querySelectorAll('.todo-item')].map(el => el.dataset.id);
+      const newIds      = filtered.map(t => t.id);
+
+      if (JSON.stringify(existingIds) === JSON.stringify(newIds)) {
+        // Just update class (done state) without rebuilding
+        list.querySelectorAll('.todo-item').forEach(el => {
+          const task = state.tasks.find(t => t.id === el.dataset.id);
+          if (task) {
+            el.classList.toggle('done', task.done);
+            el.querySelector('.task-icon').textContent = task.icon || (task.done ? '✅' : '○');
+            el.querySelector('.task-text').textContent = task.text;
+            // Update background image (Task 2.5)
+            el.classList.toggle('has-bg', !!task.backgroundImage);
+            if (task.backgroundImage) {
+              const bgCss = resolveBgImage(task.backgroundImage);
+              if (bgCss) el.style.setProperty('--task-bg', bgCss);
+            } else {
+              el.style.removeProperty('--task-bg');
+            }
+          }
+        });
+        _prevTaskIds = newIds;
+        return;
+      }
+
+      // Capture positions BEFORE DOM change for FLIP
+      const prevPositions = capturePositions(list);
+      const prevIdSet = new Set(_prevTaskIds);
+
+      list.innerHTML = '';
+      filtered.forEach(task => {
+        const el = buildTaskEl(task);
+        // Mark genuinely new tasks for appear animation
+        if (!prevIdSet.has(task.id) && _initialRenderDone) {
+          el.classList.add('appearing');
+          el.addEventListener('animationend', () => el.classList.remove('appearing'), { once: true });
+        }
+        list.appendChild(el);
+      });
+
+      // FLIP: animate existing items sliding into new positions
+      if (prevPositions.size > 0) {
+        animateFLIP(list, prevPositions);
+      }
+
+      _prevTaskIds = newIds;
+      initDragDrop(list);
+    }
+
+    // ─── Background Image presets & resolver (Task 2.5, hoisted) ──────
+    const BG_PRESETS = [
+      { name: 'Закат',       css: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' },
+      { name: 'Океан',       css: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' },
+      { name: 'Лес',         css: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)' },
+      { name: 'Лаванда',     css: 'linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%)' },
+      { name: 'Огонь',       css: 'linear-gradient(135deg, #f83600 0%, #f9d423 100%)' },
+      { name: 'Ночь',        css: 'linear-gradient(135deg, #0c3483 0%, #a2b6df 100%)' },
+      { name: 'Карамель',    css: 'linear-gradient(135deg, #f6d365 0%, #fda085 100%)' },
+      { name: 'Мята',        css: 'linear-gradient(135deg, #96fbc4 0%, #f9f586 100%)' },
+      { name: 'Вишня',       css: 'linear-gradient(135deg, #f5515f 0%, #a1051d 100%)' },
+      { name: 'Небо',        css: 'linear-gradient(135deg, #89f7fe 0%, #66a6ff 100%)' },
+      { name: 'Аметист',     css: 'linear-gradient(135deg, #7f00ff 0%, #e100ff 100%)' },
+      { name: 'Радуга',      css: 'linear-gradient(135deg, #f77062 0%, #fe5196 50%, #a855f7 100%)' },
+    ];
+
+    function resolveBgImage(value) {
+      if (!value) return null;
+      if (value.startsWith('preset:')) {
+        const idx = parseInt(value.split(':')[1], 10);
+        return BG_PRESETS[idx]?.css ?? null;
+      }
+      return `url(${value})`;
+    }
+
+    /** Master render — called on every state change */
+    let _renderGroupsFn = null;
+    function render(state) {
+      renderStats(state);
+      renderFilters(state);
+      renderList(state);
+      // renderGroups injected later (Task 3.4)
+      if (_renderGroupsFn) _renderGroupsFn(state);
+    }
+
+    // Subscribe render to store
+    store.subscribe(render);
+
+    // Initial render from loaded state
+    render(store.getState());
+    _initialRenderDone = true;
+
+    // Init D&D on first paint if tasks already exist
+    const listEl = document.getElementById('todo-list');
+    if (listEl.querySelector('.todo-item')) initDragDrop(listEl);
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  LUCIDE ICONS INIT
+    // ══════════════════════════════════════════════════════════════════════
+    lucide.createIcons();
+
+    // ─── Date Display ─────────────────────────────────────────────────────
+    const dateEl = document.getElementById('app-date');
+    const now = new Date();
+    dateEl.textContent = now.toLocaleDateString('ru-RU', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+    });
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  THEME — reads/writes via Store
+    // ══════════════════════════════════════════════════════════════════════
+    const html = document.documentElement;
+    const toggleBtn = document.getElementById('theme-toggle');
+    const themeIcon = document.getElementById('theme-icon');
+
+    function applyTheme(dark) {
+      if (dark) {
+        html.classList.add('dark');
+        themeIcon.setAttribute('data-lucide', 'sun');
+      } else {
+        html.classList.remove('dark');
+        themeIcon.setAttribute('data-lucide', 'moon');
+      }
+      lucide.createIcons();
+      store.setState({ theme: dark ? 'dark' : 'light' });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  DRAG & DROP — Native HTML5 API
+    // ══════════════════════════════════════════════════════════════════════
+
+    let dragSrcId  = null;   // id of the item being dragged
+    let dragOverId = null;   // id of the item currently hovered
+    let dragPos    = null;   // 'top' | 'bottom'
+
+    function clearDragStyles(container) {
+      container.querySelectorAll('.todo-item').forEach(el => {
+        el.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom');
+      });
+    }
+
+    /**
+     * Reorder tasks in Store.
+     * Takes new ordered array of filtered items and merges back into full array.
+     * Non-filtered tasks keep their relative positions between filtered tasks.
+     */
+    function applyDragOrder(newFilteredOrder) {
+      const state   = store.getState();
+      const allSorted = [...state.tasks].sort((a, b) => a.order - b.order);
+      const filteredIds = new Set(newFilteredOrder.map(t => t.id));
+
+      // Slots occupied by filtered tasks in full array (by index)
+      const slots = allSorted.reduce((acc, t, i) => {
+        if (filteredIds.has(t.id)) acc.push(i);
+        return acc;
+      }, []);
+
+      // Place new filtered order into those slots
+      const result = [...allSorted];
+      slots.forEach((slotIdx, i) => {
+        result[slotIdx] = newFilteredOrder[i];
+      });
+
+      // Reassign order values 0..n
+      const reordered = result.map((t, i) => ({ ...t, order: i }));
+      store.setState({ tasks: reordered });
+    }
+
+    function initDragDrop(list) {
+      list.addEventListener('dragstart', e => {
+        const item = e.target.closest('.todo-item');
+        if (!item) return;
+        dragSrcId = item.dataset.id;
+        item.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        // Firefox requires data to be set
+        e.dataTransfer.setData('text/plain', dragSrcId);
+      });
+
+      list.addEventListener('dragend', () => {
+        clearDragStyles(list);
+        dragSrcId  = null;
+        dragOverId = null;
+        dragPos    = null;
+      });
+
+      list.addEventListener('dragover', e => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+
+        const item = e.target.closest('.todo-item');
+        if (!item || item.dataset.id === dragSrcId) return;
+
+        // Determine top/bottom half
+        const rect   = item.getBoundingClientRect();
+        const midY   = rect.top + rect.height / 2;
+        const newPos = e.clientY < midY ? 'top' : 'bottom';
+
+        if (item.dataset.id === dragOverId && newPos === dragPos) return;
+
+        dragOverId = item.dataset.id;
+        dragPos    = newPos;
+
+        clearDragStyles(list);
+        item.classList.add(newPos === 'top' ? 'drag-over-top' : 'drag-over-bottom');
+        list.querySelector(`[data-id="${dragSrcId}"]`)?.classList.add('dragging');
+      });
+
+      list.addEventListener('dragleave', e => {
+        if (!list.contains(e.relatedTarget)) {
+          clearDragStyles(list);
+          list.querySelector(`[data-id="${dragSrcId}"]`)?.classList.add('dragging');
+          dragOverId = null;
+          dragPos    = null;
+        }
+      });
+
+      list.addEventListener('drop', e => {
+        e.preventDefault();
+        if (!dragSrcId || !dragOverId || dragSrcId === dragOverId) return;
+
+        const state    = store.getState();
+        const filtered = getFiltered(state.tasks, state.filter);
+
+        const srcIdx  = filtered.findIndex(t => t.id === dragSrcId);
+        const destIdx = filtered.findIndex(t => t.id === dragOverId);
+        if (srcIdx === -1 || destIdx === -1) return;
+
+        const newOrder = [...filtered];
+        const [moved]  = newOrder.splice(srcIdx, 1);
+
+        // Insert before or after dest
+        const insertAt = dragPos === 'top'
+          ? (destIdx > srcIdx ? destIdx - 1 : destIdx)
+          : (destIdx < srcIdx ? destIdx + 1 : destIdx);
+
+        newOrder.splice(insertAt, 0, moved);
+
+        clearDragStyles(list);
+        applyDragOrder(newOrder);
+      });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  CORE CRUD — Toggle & Delete (Task 3.1)
+    // ══════════════════════════════════════════════════════════════════════
+
+    function toggleTask(id) {
+      // Pulse animation on toggle (Task 4.1)
+      const el = document.querySelector(`[data-id="${id}"]`);
+      if (el) {
+        el.classList.add('toggling');
+        el.addEventListener('animationend', () => el.classList.remove('toggling'), { once: true });
+      }
+      store.setState(prev => ({
+        tasks: prev.tasks.map(t => t.id === id ? { ...t, done: !t.done } : t),
+      }));
+    }
+
+    // ── Undo Engine (Task 3.2) ─────────────────────────────────────────
+    const undoToast     = document.getElementById('undo-toast');
+    const undoToastText = document.getElementById('undo-toast-text');
+    const undoToastBtn  = document.getElementById('undo-toast-btn');
+    const undoProgress  = document.getElementById('undo-toast-progress');
+
+    const UNDO_TIMEOUT = 5000;
+    let undoBuffer  = null;   // { task, index } — deleted task snapshot
+    let undoTimer   = null;
+    let undoAnimId  = null;
+
+    function showUndoToast(task) {
+      // Cancel any previous undo
+      commitUndo();
+
+      undoBuffer = {
+        task: structuredClone(task),
+        index: store.getState().tasks.length, // will insert at end if original pos gone
+      };
+
+      // Find original position (order) before removal
+      const state = store.getState();
+      const sorted = [...state.tasks].sort((a, b) => a.order - b.order);
+      const origIdx = sorted.findIndex(t => t.id === task.id);
+      if (origIdx !== -1) undoBuffer.index = origIdx;
+
+      undoToastText.textContent = 'Задача удалена';
+      undoProgress.style.transition = 'none';
+      undoProgress.style.width = '100%';
+
+      // Force reflow, then animate progress bar
+      void undoProgress.offsetWidth;
+      undoProgress.style.transition = `width ${UNDO_TIMEOUT}ms linear`;
+      undoProgress.style.width = '0%';
+
+      undoToast.classList.add('visible');
+
+      undoTimer = setTimeout(() => {
+        hideUndoToast();
+        undoBuffer = null;
+      }, UNDO_TIMEOUT);
+    }
+
+    function hideUndoToast() {
+      undoToast.classList.remove('visible');
+      clearTimeout(undoTimer);
+      undoTimer = null;
+    }
+
+    function commitUndo() {
+      // Finalize previous pending delete (no restore)
+      hideUndoToast();
+      undoBuffer = null;
+    }
+
+    function restoreTask() {
+      if (!undoBuffer) return;
+      const restored = undoBuffer.task;
+      hideUndoToast();
+
+      store.setState(prev => {
+        const tasks = [...prev.tasks];
+        // Reassign order to insert at original position
+        const sorted = tasks.sort((a, b) => a.order - b.order);
+        sorted.splice(undoBuffer.index, 0, restored);
+        // Re-index order values
+        return { tasks: sorted.map((t, i) => ({ ...t, order: i })) };
+      });
+
+      undoBuffer = null;
+    }
+
+    undoToastBtn.addEventListener('click', restoreTask);
+
+    function deleteTask(id) {
+      // Snapshot the task before removing
+      const task = store.getState().tasks.find(t => t.id === id);
+
+      const el = document.querySelector(`[data-id="${id}"]`);
+      if (el) {
+        el.classList.add('removing');
+        el.addEventListener('animationend', () => {
+          store.setState(prev => ({
+            tasks: prev.tasks.filter(t => t.id !== id),
+          }));
+          if (task) showUndoToast(task);
+        }, { once: true });
+      } else {
+        store.setState(prev => ({
+          tasks: prev.tasks.filter(t => t.id !== id),
+        }));
+        if (task) showUndoToast(task);
+      }
+    }
+
+    // Delegated click handler on todo-list for action buttons
+    document.getElementById('todo-list').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-action]');
+      if (!btn) return;
+      const item = btn.closest('.todo-item');
+      if (!item) return;
+      const id = item.dataset.id;
+
+      if (btn.dataset.action === 'toggle') toggleTask(id);
+      if (btn.dataset.action === 'delete') deleteTask(id);
+    });
+
+    // ── Filter Tab clicks ────────────────────────────────────────────────
+    document.querySelectorAll('.filter-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        store.setState({ filter: btn.dataset.filter });
+      });
+    });
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  INPUT 3.0 — Smart Validation & Add Logic
+    // ══════════════════════════════════════════════════════════════════════
+    const todoInput    = document.getElementById('todo-input');
+    const addBtn       = document.getElementById('add-btn');
+    const inputHint    = document.getElementById('input-hint');
+    const inputEmojiBtn = document.getElementById('input-emoji-btn');
+    let   pendingIcon  = '';  // emoji staged for next new task via picker
+
+    let hintTimer = null;
+
+    function showHint(msg) {
+      clearTimeout(hintTimer);
+      inputHint.textContent = msg;
+      inputHint.classList.add('visible');
+      hintTimer = setTimeout(hideHint, 2500);
+    }
+
+    function hideHint() {
+      inputHint.classList.remove('visible');
+    }
+
+    function triggerError() {
+      todoInput.classList.remove('input-error');
+      // Force reflow so the animation re-triggers even if already applied
+      void todoInput.offsetWidth;
+      todoInput.classList.add('input-error');
+      todoInput.addEventListener('animationend', () => {
+        todoInput.classList.remove('input-error');
+      }, { once: true });
+    }
+
+    function clearInputWithAnimation() {
+      todoInput.classList.remove('input-success');
+      void todoInput.offsetWidth;
+      todoInput.classList.add('input-success');
+      todoInput.value = '';
+      todoInput.addEventListener('animationend', () => {
+        todoInput.classList.remove('input-success');
+      }, { once: true });
+    }
+
+    function addTask() {
+      const raw  = todoInput.value;
+      const text = raw.trim();
+
+      // Validation: block whitespace-only input
+      if (!text) {
+        triggerError();
+        showHint(raw.length > 0 ? 'Задача не может состоять только из пробелов' : 'Введите текст задачи');
+        todoInput.focus();
+        return;
+      }
+
+      hideHint();
+
+      // Build new task object
+      const newTask = {
+        id:        crypto.randomUUID(),
+        text,
+        done:      false,
+        icon:      pendingIcon,  // Set by Emoji Picker (Task 2.4)
+        createdAt: Date.now(),
+        order:     store.getState().tasks.length,
+      };
+
+      store.setState(prev => ({
+        tasks: [...prev.tasks, newTask],
+      }));
+
+      // Animate button pop + clear input
+      addBtn.classList.remove('btn-pop');
+      void addBtn.offsetWidth;
+      addBtn.classList.add('btn-pop');
+      addBtn.addEventListener('animationend', () => {
+        addBtn.classList.remove('btn-pop');
+      }, { once: true });
+
+      clearInputWithAnimation();
+
+      // Reset pending emoji icon to default
+      pendingIcon = '';
+      inputEmojiBtn.textContent = '😊';
+      inputEmojiBtn.classList.remove('has-emoji');
+
+      todoInput.focus();
+    }
+
+    addBtn.addEventListener('click', addTask);
+
+    todoInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') addTask();
+    });
+
+    // Live: hide hint as soon as user starts typing valid content
+    todoInput.addEventListener('input', () => {
+      if (todoInput.value.trim()) hideHint();
+    });
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  EMOJI PICKER — Compact picker with categories, search & keyboard nav
+    // ══════════════════════════════════════════════════════════════════════
+
+    const EMOJI_DATA = [
+      { name: 'Смайлы',   icon: '😊', emojis: [
+        { e: '😊', k: 'улыбка радость' }, { e: '😄', k: 'смех радость' }, { e: '😁', k: 'ухмылка' },
+        { e: '😍', k: 'любовь сердце' }, { e: '🤩', k: 'звезда восторг' }, { e: '😎', k: 'крутой очки' },
+        { e: '🤔', k: 'думать вопрос' }, { e: '😴', k: 'сон спать' }, { e: '😢', k: 'грусть плач' },
+        { e: '😡', k: 'злость гнев' }, { e: '🥳', k: 'праздник вечеринка' }, { e: '😇', k: 'ангел добро' },
+        { e: '🤗', k: 'обнимать' }, { e: '🫡', k: 'честь салют' }, { e: '🤓', k: 'ботан очки' },
+        { e: '😏', k: 'ухмылка хитрый' },
+      ]},
+      { name: 'Жесты',   icon: '👋', emojis: [
+        { e: '👍', k: 'палец вверх ок' }, { e: '👎', k: 'палец вниз' }, { e: '👋', k: 'привет рука' },
+        { e: '✌️', k: 'победа мир' }, { e: '🤞', k: 'удача скрестить' }, { e: '💪', k: 'сила бицепс' },
+        { e: '👏', k: 'аплодисменты браво' }, { e: '🙌', k: 'руки ура' }, { e: '🤝', k: 'рукопожатие' },
+        { e: '✋', k: 'стоп ладонь' }, { e: '🫶', k: 'сердце руки' }, { e: '☝️', k: 'указатель вверх' },
+      ]},
+      { name: 'Объекты', icon: '💡', emojis: [
+        { e: '💡', k: 'идея лампа' }, { e: '📌', k: 'кнопка закрепить' }, { e: '📎', k: 'скрепка' },
+        { e: '🔑', k: 'ключ доступ' }, { e: '🔒', k: 'замок безопасность' }, { e: '📦', k: 'коробка посылка' },
+        { e: '💎', k: 'бриллиант драгоценный' }, { e: '🎯', k: 'цель мишень' }, { e: '🏆', k: 'кубок победа' },
+        { e: '🎁', k: 'подарок' }, { e: '📝', k: 'заметка запись' }, { e: '📚', k: 'книги учеба' },
+        { e: '💻', k: 'ноутбук компьютер' }, { e: '📱', k: 'телефон мобильный' }, { e: '⏰', k: 'будильник время' },
+        { e: '🔔', k: 'колокольчик уведомление' },
+      ]},
+      { name: 'Еда',     icon: '🍕', emojis: [
+        { e: '🍕', k: 'пицца еда' }, { e: '🍔', k: 'бургер еда' }, { e: '☕', k: 'кофе напиток' },
+        { e: '🍎', k: 'яблоко фрукт' }, { e: '🥑', k: 'авокадо' }, { e: '🍰', k: 'торт десерт' },
+        { e: '🍩', k: 'пончик сладкое' }, { e: '🥤', k: 'стакан напиток' }, { e: '🧁', k: 'кекс' },
+        { e: '🍣', k: 'суши рыба' }, { e: '🥗', k: 'салат здоровье' }, { e: '🍺', k: 'пиво напиток' },
+      ]},
+      { name: 'Природа', icon: '🌿', emojis: [
+        { e: '🌟', k: 'звезда сияние' }, { e: '⭐', k: 'звезда' }, { e: '🔥', k: 'огонь горячо' },
+        { e: '❄️', k: 'снег холод' }, { e: '🌈', k: 'радуга' }, { e: '🌸', k: 'цветок сакура' },
+        { e: '🌿', k: 'листья трава' }, { e: '🍀', k: 'клевер удача' }, { e: '🌊', k: 'волна море' },
+        { e: '⚡', k: 'молния энергия' }, { e: '🌙', k: 'луна ночь' }, { e: '☀️', k: 'солнце день' },
+      ]},
+      { name: 'Животные', icon: '🐱', emojis: [
+        { e: '🐱', k: 'кот кошка' }, { e: '🐶', k: 'пес собака' }, { e: '🦊', k: 'лиса' },
+        { e: '🐻', k: 'медведь' }, { e: '🐼', k: 'панда' }, { e: '🦁', k: 'лев' },
+        { e: '🐸', k: 'лягушка' }, { e: '🦋', k: 'бабочка' }, { e: '🐝', k: 'пчела мед' },
+        { e: '🦄', k: 'единорог' }, { e: '🐙', k: 'осьминог' }, { e: '🐬', k: 'дельфин' },
+      ]},
+      { name: 'Путешествия', icon: '✈️', emojis: [
+        { e: '✈️', k: 'самолет перелет' }, { e: '🚀', k: 'ракета запуск' }, { e: '🚗', k: 'машина авто' },
+        { e: '🚲', k: 'велосипед' }, { e: '🏠', k: 'дом' }, { e: '🏖️', k: 'пляж отдых' },
+        { e: '⛰️', k: 'гора поход' }, { e: '🗺️', k: 'карта маршрут' }, { e: '🧳', k: 'чемодан поездка' },
+        { e: '🎪', k: 'цирк развлечение' }, { e: '🏕️', k: 'палатка кемпинг' }, { e: '🚢', k: 'корабль круиз' },
+      ]},
+      { name: 'Спорт',   icon: '⚽', emojis: [
+        { e: '⚽', k: 'футбол мяч' }, { e: '🏀', k: 'баскетбол' }, { e: '🏋️', k: 'тренировка зал' },
+        { e: '🧘', k: 'йога медитация' }, { e: '🏃', k: 'бег спорт' }, { e: '🚴', k: 'велоспорт' },
+        { e: '🎾', k: 'теннис' }, { e: '🏊', k: 'плавание' }, { e: '🥊', k: 'бокс' },
+        { e: '⛷️', k: 'лыжи зима' }, { e: '🏄', k: 'серфинг' }, { e: '🎳', k: 'боулинг' },
+      ]},
+      { name: 'Символы', icon: '❤️', emojis: [
+        { e: '❤️', k: 'сердце любовь' }, { e: '💜', k: 'фиолетовое сердце' }, { e: '💚', k: 'зеленое сердце' },
+        { e: '✅', k: 'галочка готово' }, { e: '❌', k: 'крест нет' }, { e: '⚠️', k: 'внимание предупреждение' },
+        { e: '🚫', k: 'запрет стоп' }, { e: '♻️', k: 'переработка экология' }, { e: '💯', k: 'сто процент' },
+        { e: '🎵', k: 'музыка нота' }, { e: '💤', k: 'сон zzz' }, { e: '✨', k: 'блеск искры' },
+      ]},
+      { name: 'Флаги',   icon: '🏁', emojis: [
+        { e: '🏁', k: 'финиш гонка' }, { e: '🚩', k: 'красный флаг' }, { e: '🏳️', k: 'белый флаг' },
+        { e: '🎌', k: 'флаги праздник' }, { e: '🏴', k: 'черный флаг' }, { e: '🇷🇺', k: 'россия' },
+      ]},
+    ];
+
+    // ─── Picker state ───────────────────────────────────────────────────
+    const pickerEl       = document.getElementById('emoji-picker');
+    const pickerSearch   = document.getElementById('picker-search');
+    const pickerCats     = document.getElementById('picker-cats');
+    const pickerGridWrap = document.getElementById('picker-grid-wrap');
+    const pickerPreview  = document.getElementById('picker-preview');
+    const pickerClearBtn = document.getElementById('picker-clear-btn');
+
+    let pickerTarget   = null;    // null = input-btn, or task id string
+    let activeCatIdx   = 0;
+    let focusedEmojiIdx = -1;     // for keyboard nav inside grid
+
+    // ─── Build category pills (once) ────────────────────────────────────
+    EMOJI_DATA.forEach((cat, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'picker-cat-btn' + (i === 0 ? ' active' : '');
+      btn.textContent = cat.icon;
+      btn.title = cat.name;
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-label', cat.name);
+      btn.addEventListener('click', () => {
+        activeCatIdx = i;
+        pickerSearch.value = '';
+        renderPickerGrid();
+        updateCatPills();
+        pickerSearch.focus();
+      });
+      pickerCats.appendChild(btn);
+    });
+
+    function updateCatPills() {
+      pickerCats.querySelectorAll('.picker-cat-btn').forEach((b, i) => {
+        b.classList.toggle('active', i === activeCatIdx);
+      });
+    }
+
+    // ─── Render emoji grid ──────────────────────────────────────────────
+    function renderPickerGrid(query) {
+      pickerGridWrap.innerHTML = '';
+      focusedEmojiIdx = -1;
+
+      const q = (query || '').toLowerCase().trim();
+      const cats = q
+        ? [{ name: 'Результаты', emojis: EMOJI_DATA.flatMap(c => c.emojis).filter(e => e.k.includes(q) || e.e === q) }]
+        : [EMOJI_DATA[activeCatIdx]];
+
+      if (q && cats[0].emojis.length === 0) {
+        pickerGridWrap.innerHTML = '<div style="padding:1rem;text-align:center;color:var(--color-text-muted);font-size:0.8rem;">Ничего не найдено</div>';
+        return;
+      }
+
+      const currentEmoji = pickerTarget
+        ? (store.getState().tasks.find(t => t.id === pickerTarget)?.icon || '')
+        : pendingIcon;
+
+      cats.forEach(cat => {
+        const label = document.createElement('div');
+        label.className = 'picker-section-label';
+        label.textContent = cat.name;
+        pickerGridWrap.appendChild(label);
+
+        const grid = document.createElement('div');
+        grid.className = 'picker-grid';
+
+        cat.emojis.forEach(item => {
+          const btn = document.createElement('button');
+          btn.className = 'picker-emoji' + (item.e === currentEmoji ? ' selected' : '');
+          btn.textContent = item.e;
+          btn.setAttribute('tabindex', '-1');
+          btn.setAttribute('role', 'option');
+          btn.setAttribute('aria-label', item.k);
+          btn.addEventListener('click', () => selectEmoji(item.e));
+          grid.appendChild(btn);
+        });
+
+        pickerGridWrap.appendChild(grid);
+      });
+    }
+
+    // ─── Select emoji ───────────────────────────────────────────────────
+    function selectEmoji(emoji) {
+      if (pickerTarget) {
+        // Editing existing task icon
+        store.setState(prev => ({
+          tasks: prev.tasks.map(t => t.id === pickerTarget ? { ...t, icon: emoji } : t),
+        }));
+      } else {
+        // Staging for next new task
+        pendingIcon = emoji;
+        inputEmojiBtn.textContent = emoji;
+        inputEmojiBtn.classList.add('has-emoji');
+      }
+      pickerPreview.textContent = emoji;
+      closePicker();
+    }
+
+    function clearPickerSelection() {
+      if (pickerTarget) {
+        store.setState(prev => ({
+          tasks: prev.tasks.map(t => t.id === pickerTarget ? { ...t, icon: '' } : t),
+        }));
+      } else {
+        pendingIcon = '';
+        inputEmojiBtn.textContent = '😊';
+        inputEmojiBtn.classList.remove('has-emoji');
+      }
+      pickerPreview.textContent = '';
+      closePicker();
+    }
+
+    // ─── Open / close / position ────────────────────────────────────────
+    function openPicker(triggerEl, taskId) {
+      pickerTarget = taskId || null;
+      activeCatIdx = 0;
+      pickerSearch.value = '';
+      renderPickerGrid();
+      updateCatPills();
+
+      // Set preview to current emoji
+      const current = pickerTarget
+        ? (store.getState().tasks.find(t => t.id === pickerTarget)?.icon || '')
+        : pendingIcon;
+      pickerPreview.textContent = current;
+
+      pickerEl.classList.add('open');
+
+      // Position relative to trigger, clamped to viewport
+      requestAnimationFrame(() => {
+        const tr = triggerEl.getBoundingClientRect();
+        const pk = pickerEl.getBoundingClientRect();
+
+        let top  = tr.bottom + 6;
+        let left = tr.left;
+
+        // Clamp right edge
+        if (left + pk.width > window.innerWidth - 12) {
+          left = window.innerWidth - pk.width - 12;
+        }
+        // Clamp left edge
+        if (left < 12) left = 12;
+        // If overflows bottom, show above trigger
+        if (top + pk.height > window.innerHeight - 12) {
+          top = tr.top - pk.height - 6;
+        }
+        if (top < 12) top = 12;
+
+        pickerEl.style.top  = top + 'px';
+        pickerEl.style.left = left + 'px';
+
+        pickerSearch.focus();
+      });
+    }
+
+    function closePicker() {
+      pickerEl.classList.remove('open');
+      pickerTarget = null;
+      focusedEmojiIdx = -1;
+    }
+
+    function isPickerOpen() {
+      return pickerEl.classList.contains('open');
+    }
+
+    // ─── Trigger: input emoji button ────────────────────────────────────
+    inputEmojiBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (isPickerOpen() && !pickerTarget) {
+        closePicker();
+      } else {
+        openPicker(inputEmojiBtn, null);
+      }
+    });
+
+    // ─── Trigger: task icon click (delegated) ───────────────────────────
+    document.getElementById('todo-list').addEventListener('click', (e) => {
+      const icon = e.target.closest('.task-icon');
+      if (!icon) return;
+      const item = icon.closest('.todo-item');
+      if (!item) return;
+      e.stopPropagation();
+      if (isPickerOpen() && pickerTarget === item.dataset.id) {
+        closePicker();
+      } else {
+        openPicker(icon, item.dataset.id);
+      }
+    });
+
+    // ─── Search input ───────────────────────────────────────────────────
+    pickerSearch.addEventListener('input', () => {
+      renderPickerGrid(pickerSearch.value);
+      // Deactivate category pills when searching
+      if (pickerSearch.value.trim()) {
+        pickerCats.querySelectorAll('.picker-cat-btn').forEach(b => b.classList.remove('active'));
+      } else {
+        updateCatPills();
+      }
+    });
+
+    // ─── Clear button ───────────────────────────────────────────────────
+    pickerClearBtn.addEventListener('click', clearPickerSelection);
+
+    // ─── Close on outside click ─────────────────────────────────────────
+    document.addEventListener('click', (e) => {
+      if (!isPickerOpen()) return;
+      if (pickerEl.contains(e.target)) return;
+      if (e.target.closest('.emoji-trigger-btn') || e.target.closest('.task-icon') || e.target.closest('.group-icon') || e.target.closest('.modal-emoji-btn')) return;
+      closePicker();
+    });
+
+    // ─── Keyboard navigation ────────────────────────────────────────────
+    pickerEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closePicker();
+        (pickerTarget ? document.querySelector(`[data-id="${pickerTarget}"] .task-icon`) : inputEmojiBtn)?.focus();
+        return;
+      }
+
+      const btns = [...pickerGridWrap.querySelectorAll('.picker-emoji')];
+      if (!btns.length) return;
+
+      const cols = 8;
+
+      if (e.key === 'Tab' && !e.shiftKey && document.activeElement === pickerSearch) {
+        // Move focus from search into grid
+        e.preventDefault();
+        focusedEmojiIdx = 0;
+        btns[0].focus();
+        return;
+      }
+
+      if (e.key === 'Enter' && document.activeElement.classList.contains('picker-emoji')) {
+        e.preventDefault();
+        document.activeElement.click();
+        return;
+      }
+
+      if (['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
+        if (!document.activeElement.classList.contains('picker-emoji')) return;
+        e.preventDefault();
+        const cur = btns.indexOf(document.activeElement);
+        let next = cur;
+        if (e.key === 'ArrowRight') next = Math.min(cur + 1, btns.length - 1);
+        if (e.key === 'ArrowLeft')  next = Math.max(cur - 1, 0);
+        if (e.key === 'ArrowDown')  next = Math.min(cur + cols, btns.length - 1);
+        if (e.key === 'ArrowUp')    next = Math.max(cur - cols, 0);
+        btns[next].focus();
+        focusedEmojiIdx = next;
+      }
+    });
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  BACKGROUND IMAGE PICKER (Task 2.5)
+    // ══════════════════════════════════════════════════════════════════════
+
+    const bgPickerModal   = document.getElementById('bg-picker-modal');
+    const bgPickerClose   = document.getElementById('bg-picker-close');
+    const bgPickerRemove  = document.getElementById('bg-picker-remove');
+    const bgPickerApply   = document.getElementById('bg-picker-apply');
+    const bgUploadArea    = document.getElementById('bg-upload-area');
+    const bgFileInput     = document.getElementById('bg-file-input');
+    const bgUploadPreview = document.getElementById('bg-upload-preview');
+    const bgSizeWarning   = document.getElementById('bg-size-warning');
+    const bgPresetGrid    = document.getElementById('bg-preset-grid');
+
+    let bgPickerTaskId    = null;   // task id currently editing
+    let bgPickerValue     = '';     // selected value: data URL, 'preset:N', or ''
+    let bgPickerPrevFocus = null;   // element to restore focus to
+
+    // ─── Build preset grid (once) ───────────────────────────────────
+    BG_PRESETS.forEach((preset, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'bg-preset-item';
+      btn.style.background = preset.css;
+      btn.title = preset.name;
+      btn.setAttribute('aria-label', preset.name);
+      btn.dataset.presetIdx = i;
+      btn.addEventListener('click', () => {
+        bgPickerValue = 'preset:' + i;
+        bgUploadPreview.classList.remove('visible');
+        bgSizeWarning.classList.remove('visible');
+        updatePresetSelection();
+      });
+      bgPresetGrid.appendChild(btn);
+    });
+
+    function updatePresetSelection() {
+      bgPresetGrid.querySelectorAll('.bg-preset-item').forEach(btn => {
+        btn.classList.toggle('selected', bgPickerValue === 'preset:' + btn.dataset.presetIdx);
+      });
+    }
+
+    // ─── Open / Close modal ─────────────────────────────────────────
+    function openBgPicker(taskId) {
+      bgPickerTaskId = taskId;
+      bgPickerPrevFocus = document.activeElement;
+
+      // Read current value from store
+      const task = store.getState().tasks.find(t => t.id === taskId);
+      bgPickerValue = task?.backgroundImage || '';
+
+      // Reset upload preview
+      bgUploadPreview.classList.remove('visible');
+      bgSizeWarning.classList.remove('visible');
+
+      // If current value is a data URL, show preview
+      if (bgPickerValue && !bgPickerValue.startsWith('preset:')) {
+        bgUploadPreview.src = bgPickerValue;
+        bgUploadPreview.classList.add('visible');
+      }
+
+      updatePresetSelection();
+      bgPickerModal.classList.add('open');
+      requestAnimationFrame(() => bgUploadArea.focus());
+    }
+
+    function closeBgPicker() {
+      bgPickerModal.classList.remove('open');
+      bgPickerTaskId = null;
+      bgPickerValue = '';
+      bgUploadPreview.classList.remove('visible');
+      bgSizeWarning.classList.remove('visible');
+      bgPickerPrevFocus?.focus();
+    }
+
+    bgPickerClose.addEventListener('click', closeBgPicker);
+    bgPickerModal.addEventListener('click', (e) => {
+      if (e.target === bgPickerModal) closeBgPicker();
+    });
+
+    // ─── Keyboard: Escape to close ──────────────────────────────────
+    bgPickerModal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        closeBgPicker();
+      }
+      // Trap focus inside modal
+      if (e.key === 'Tab') {
+        const focusable = bgPickerModal.querySelectorAll('button, [tabindex="0"], input[type="file"]');
+        const arr = [...focusable].filter(el => el.offsetParent !== null);
+        if (!arr.length) return;
+        const first = arr[0];
+        const last = arr[arr.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    });
+
+    // ─── File upload ────────────────────────────────────────────────
+    bgUploadArea.addEventListener('click', () => bgFileInput.click());
+    bgUploadArea.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        bgFileInput.click();
+      }
+    });
+
+    // Drag & drop onto upload area
+    bgUploadArea.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      bgUploadArea.style.borderColor = 'var(--color-accent)';
+    });
+    bgUploadArea.addEventListener('dragleave', () => {
+      bgUploadArea.style.borderColor = '';
+    });
+    bgUploadArea.addEventListener('drop', (e) => {
+      e.preventDefault();
+      bgUploadArea.style.borderColor = '';
+      const file = e.dataTransfer.files?.[0];
+      if (file?.type?.startsWith('image/')) processImageFile(file);
+    });
+
+    bgFileInput.addEventListener('change', () => {
+      const file = bgFileInput.files?.[0];
+      if (file) processImageFile(file);
+      bgFileInput.value = ''; // reset for re-upload
+    });
+
+    function processImageFile(file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          compressImage(img, 0.7, (dataUrl) => {
+            bgPickerValue = dataUrl;
+            bgUploadPreview.src = dataUrl;
+            bgUploadPreview.classList.add('visible');
+            // Deselect presets
+            updatePresetSelection();
+          });
+        };
+        img.src = reader.result;
+      };
+      reader.readAsDataURL(file);
+    }
+
+    /**
+     * Resize & compress image to fit max 400x300, target ≤50KB data URL.
+     * Progressively reduces quality if needed.
+     */
+    function compressImage(img, quality, callback) {
+      const MAX_W = 400, MAX_H = 300, MAX_SIZE = 50 * 1024;
+      let w = img.naturalWidth, h = img.naturalHeight;
+
+      // Scale down
+      if (w > MAX_W || h > MAX_H) {
+        const ratio = Math.min(MAX_W / w, MAX_H / h);
+        w = Math.round(w * ratio);
+        h = Math.round(h * ratio);
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+
+      let q = quality;
+      let dataUrl = canvas.toDataURL('image/jpeg', q);
+
+      // Progressive compression if too large
+      bgSizeWarning.classList.remove('visible');
+      while (dataUrl.length > MAX_SIZE && q > 0.1) {
+        q -= 0.1;
+        bgSizeWarning.classList.add('visible');
+        dataUrl = canvas.toDataURL('image/jpeg', q);
+      }
+
+      // If still too large after min quality, reduce dimensions further
+      if (dataUrl.length > MAX_SIZE) {
+        const smallCanvas = document.createElement('canvas');
+        const scale = 0.6;
+        smallCanvas.width = Math.round(w * scale);
+        smallCanvas.height = Math.round(h * scale);
+        smallCanvas.getContext('2d').drawImage(canvas, 0, 0, smallCanvas.width, smallCanvas.height);
+        dataUrl = smallCanvas.toDataURL('image/jpeg', 0.5);
+      }
+
+      callback(dataUrl);
+    }
+
+    // ─── Apply / Remove ──────────────────────────────────────────────
+    bgPickerApply.addEventListener('click', () => {
+      if (!bgPickerTaskId) return;
+      store.setState(prev => ({
+        tasks: prev.tasks.map(t =>
+          t.id === bgPickerTaskId ? { ...t, backgroundImage: bgPickerValue } : t
+        ),
+      }));
+      closeBgPicker();
+    });
+
+    bgPickerRemove.addEventListener('click', () => {
+      if (!bgPickerTaskId) return;
+      store.setState(prev => ({
+        tasks: prev.tasks.map(t =>
+          t.id === bgPickerTaskId ? { ...t, backgroundImage: '' } : t
+        ),
+      }));
+      closeBgPicker();
+    });
+
+    // ─── Delegated click: open bg picker from task action button ────
+    document.getElementById('todo-list').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-action="bg-image"]');
+      if (!btn) return;
+      const item = btn.closest('.todo-item');
+      if (!item) return;
+      e.stopPropagation();
+      openBgPicker(item.dataset.id);
+    });
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  TASK GROUPS — Create, render, subtask CRUD (Task 3.4)
+    // ══════════════════════════════════════════════════════════════════════
+
+    const groupListEl      = document.getElementById('group-list');
+    const createGroupBtn   = document.getElementById('create-group-btn');
+    const groupModal       = document.getElementById('group-modal');
+    const groupModalClose  = document.getElementById('group-modal-close');
+    const groupModalCancel = document.getElementById('group-modal-cancel');
+    const groupModalSubmit = document.getElementById('group-modal-submit');
+    const groupTitleInput  = document.getElementById('group-title-input');
+    const groupEmojiBtn    = document.getElementById('group-emoji-btn');
+
+    let pendingGroupIcon = '📁';
+
+    // ─── Modal open/close ─────────────────────────────────────────────
+    function openGroupModal() {
+      groupTitleInput.value = '';
+      pendingGroupIcon = '📁';
+      groupEmojiBtn.textContent = '📁';
+      groupModal.classList.add('open');
+      requestAnimationFrame(() => groupTitleInput.focus());
+    }
+
+    function closeGroupModal() {
+      groupModal.classList.remove('open');
+    }
+
+    createGroupBtn.addEventListener('click', openGroupModal);
+    groupModalClose.addEventListener('click', closeGroupModal);
+    groupModalCancel.addEventListener('click', closeGroupModal);
+
+    // Close modal on overlay click
+    groupModal.addEventListener('click', (e) => {
+      if (e.target === groupModal) closeGroupModal();
+    });
+
+    // Close modal on Escape
+    groupModal.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeGroupModal();
+    });
+
+    // Group emoji picker trigger
+    groupEmojiBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Use shared emoji picker, target = 'group-modal'
+      pickerTarget = '__group_modal__';
+      activeCatIdx = 0;
+      pickerSearch.value = '';
+      renderPickerGrid();
+      updateCatPills();
+      pickerPreview.textContent = pendingGroupIcon;
+      pickerEl.classList.add('open');
+      requestAnimationFrame(() => {
+        const tr = groupEmojiBtn.getBoundingClientRect();
+        const pk = pickerEl.getBoundingClientRect();
+        let top  = tr.bottom + 6;
+        let left = tr.left;
+        if (left + pk.width > window.innerWidth - 12) left = window.innerWidth - pk.width - 12;
+        if (left < 12) left = 12;
+        if (top + pk.height > window.innerHeight - 12) top = tr.top - pk.height - 6;
+        if (top < 12) top = 12;
+        pickerEl.style.top  = top + 'px';
+        pickerEl.style.left = left + 'px';
+        pickerSearch.focus();
+      });
+    });
+
+    // Patch selectEmoji to support group-modal target
+    const _origSelectEmoji = selectEmoji;
+    selectEmoji = function(emoji) {
+      if (pickerTarget === '__group_modal__') {
+        pendingGroupIcon = emoji;
+        groupEmojiBtn.textContent = emoji;
+        pickerPreview.textContent = emoji;
+        closePicker();
+        return;
+      }
+      // Check if target is a group icon (format: 'group:<id>')
+      if (typeof pickerTarget === 'string' && pickerTarget.startsWith('group:')) {
+        const gid = pickerTarget.slice(6);
+        store.setState(prev => ({
+          groups: prev.groups.map(g => g.id === gid ? { ...g, icon: emoji } : g),
+        }));
+        pickerPreview.textContent = emoji;
+        closePicker();
+        return;
+      }
+      _origSelectEmoji(emoji);
+    };
+
+    // Patch clearPickerSelection for group targets
+    const _origClearPicker = clearPickerSelection;
+    clearPickerSelection = function() {
+      if (pickerTarget === '__group_modal__') {
+        pendingGroupIcon = '📁';
+        groupEmojiBtn.textContent = '📁';
+        pickerPreview.textContent = '';
+        closePicker();
+        return;
+      }
+      if (typeof pickerTarget === 'string' && pickerTarget.startsWith('group:')) {
+        const gid = pickerTarget.slice(6);
+        store.setState(prev => ({
+          groups: prev.groups.map(g => g.id === gid ? { ...g, icon: '📁' } : g),
+        }));
+        pickerPreview.textContent = '';
+        closePicker();
+        return;
+      }
+      _origClearPicker();
+    };
+
+    // ─── Create group ─────────────────────────────────────────────────
+    function createGroup() {
+      const title = groupTitleInput.value.trim();
+      if (!title) {
+        groupTitleInput.classList.add('input-error');
+        groupTitleInput.addEventListener('animationend', () => {
+          groupTitleInput.classList.remove('input-error');
+        }, { once: true });
+        return;
+      }
+
+      const newGroup = {
+        id:        crypto.randomUUID(),
+        title,
+        icon:      pendingGroupIcon,
+        subtasks:  [],
+        createdAt: Date.now(),
+        collapsed: false,
+        order:     (store.getState().groups || []).length,
+      };
+
+      _newGroupIds.add(newGroup.id);
+      store.setState(prev => ({
+        groups: [...(prev.groups || []), newGroup],
+      }));
+
+      closeGroupModal();
+    }
+
+    groupModalSubmit.addEventListener('click', createGroup);
+    groupTitleInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') createGroup();
+    });
+
+    // ─── Group subtask operations ─────────────────────────────────────
+    const _newSubtaskIds = new Set();  // track for appear animation
+    const _newGroupIds   = new Set();  // track for group appear animation
+
+    function addSubtask(groupId, text) {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const sub = {
+        id:        crypto.randomUUID(),
+        text:      trimmed,
+        done:      false,
+        createdAt: Date.now(),
+        order:     0,
+      };
+      _newSubtaskIds.add(sub.id);
+      store.setState(prev => ({
+        groups: prev.groups.map(g => {
+          if (g.id !== groupId) return g;
+          const subs = [...g.subtasks, { ...sub, order: g.subtasks.length }];
+          return { ...g, subtasks: subs };
+        }),
+      }));
+    }
+
+    const _poppingSubtaskIds = new Set(); // track for check pop animation
+
+    function toggleSubtask(groupId, subtaskId) {
+      _poppingSubtaskIds.add(subtaskId);
+      store.setState(prev => ({
+        groups: prev.groups.map(g => {
+          if (g.id !== groupId) return g;
+          return {
+            ...g,
+            subtasks: g.subtasks.map(s => s.id === subtaskId ? { ...s, done: !s.done } : s),
+          };
+        }),
+      }));
+    }
+
+    function deleteSubtask(groupId, subtaskId, el) {
+      const doDelete = () => {
+        store.setState(prev => ({
+          groups: prev.groups.map(g => {
+            if (g.id !== groupId) return g;
+            return { ...g, subtasks: g.subtasks.filter(s => s.id !== subtaskId) };
+          }),
+        }));
+      };
+      if (el) {
+        el.classList.add('removing');
+        el.addEventListener('animationend', doDelete, { once: true });
+      } else {
+        doDelete();
+      }
+    }
+
+    function deleteGroup(groupId, el) {
+      const doDelete = () => {
+        store.setState(prev => ({
+          groups: prev.groups.filter(g => g.id !== groupId),
+        }));
+      };
+      if (el) {
+        el.classList.add('removing');
+        el.addEventListener('animationend', doDelete, { once: true });
+      } else {
+        doDelete();
+      }
+    }
+
+    function toggleGroupCollapse(groupId) {
+      store.setState(prev => ({
+        groups: prev.groups.map(g =>
+          g.id === groupId ? { ...g, collapsed: !g.collapsed } : g
+        ),
+      }));
+    }
+
+    // ─── Filter groups by subtask state ───────────────────────────────
+    function getFilteredGroups(groups, filter) {
+      if (!groups) return [];
+      const sorted = [...groups].sort((a, b) => a.order - b.order);
+      if (filter === 'active') return sorted.filter(g => g.subtasks.some(s => !s.done));
+      if (filter === 'done')   return sorted.filter(g => g.subtasks.length > 0 && g.subtasks.every(s => s.done));
+      return sorted;
+    }
+
+    // ─── Build group card DOM ─────────────────────────────────────────
+    function buildGroupEl(group, filter) {
+      const card = document.createElement('div');
+      card.className = 'group-card' + (group.collapsed ? ' collapsed' : '');
+      card.dataset.groupId = group.id;
+
+      const total = group.subtasks.length;
+      const done  = group.subtasks.filter(s => s.done).length;
+      const pct   = total > 0 ? Math.round((done / total) * 100) : 0;
+
+      // Header
+      const header = document.createElement('div');
+      header.className = 'group-header';
+      header.innerHTML = `
+        <span class="group-chevron">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </span>
+        <span class="group-icon" data-group-icon="${group.id}">${group.icon || '📁'}</span>
+        <span class="group-title">${escapeHtml(group.title)}</span>
+        <span class="group-progress-info">
+          <span>${done}/${total}</span>
+          <span class="group-progress-bar">
+            <span class="group-progress-fill${pct === 100 && total > 0 ? ' complete' : ''}" style="width:${pct}%"></span>
+          </span>
+        </span>
+        <div class="group-actions">
+          <button class="task-action-btn delete-btn" data-group-action="delete" aria-label="Удалить группу" title="Удалить группу">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+            </svg>
+          </button>
+        </div>
+      `;
+
+      // Click on chevron/header to toggle collapse
+      header.addEventListener('click', (e) => {
+        if (e.target.closest('[data-group-action]')) return;
+        if (e.target.closest('.group-icon')) return;
+        toggleGroupCollapse(group.id);
+      });
+
+      // Click on group icon to open emoji picker
+      header.querySelector('.group-icon').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const iconEl = e.currentTarget;
+        pickerTarget = 'group:' + group.id;
+        activeCatIdx = 0;
+        pickerSearch.value = '';
+        renderPickerGrid();
+        updateCatPills();
+        pickerPreview.textContent = group.icon || '📁';
+        pickerEl.classList.add('open');
+        requestAnimationFrame(() => {
+          const tr = iconEl.getBoundingClientRect();
+          const pk = pickerEl.getBoundingClientRect();
+          let top  = tr.bottom + 6;
+          let left = tr.left;
+          if (left + pk.width > window.innerWidth - 12) left = window.innerWidth - pk.width - 12;
+          if (left < 12) left = 12;
+          if (top + pk.height > window.innerHeight - 12) top = tr.top - pk.height - 6;
+          if (top < 12) top = 12;
+          pickerEl.style.top  = top + 'px';
+          pickerEl.style.left = left + 'px';
+          pickerSearch.focus();
+        });
+      });
+
+      // Delete group
+      header.querySelector('[data-group-action="delete"]').addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteGroup(group.id, card);
+      });
+
+      card.appendChild(header);
+
+      // Body
+      const body = document.createElement('div');
+      body.className = 'group-body';
+
+      // Subtask list
+      const subList = document.createElement('div');
+      subList.className = 'subtask-list';
+
+      const filteredSubs = filter === 'active'
+        ? group.subtasks.filter(s => !s.done)
+        : filter === 'done'
+          ? group.subtasks.filter(s => s.done)
+          : group.subtasks;
+
+      const sortedSubs = [...filteredSubs].sort((a, b) => a.order - b.order);
+
+      if (sortedSubs.length === 0 && group.subtasks.length === 0) {
+        const hint = document.createElement('div');
+        hint.className = 'group-empty-hint';
+        hint.textContent = 'Добавьте первую подзадачу';
+        subList.appendChild(hint);
+      } else if (sortedSubs.length === 0) {
+        const hint = document.createElement('div');
+        hint.className = 'group-empty-hint';
+        hint.textContent = filter === 'active' ? 'Нет активных подзадач' : 'Нет выполненных подзадач';
+        subList.appendChild(hint);
+      } else {
+        sortedSubs.forEach(sub => {
+          const subEl = document.createElement('div');
+          const isNewSub = _newSubtaskIds.has(sub.id);
+          subEl.className = 'subtask-item' + (sub.done ? ' done' : '') + (isNewSub ? ' appearing' : '');
+          if (isNewSub) {
+            _newSubtaskIds.delete(sub.id);
+            subEl.addEventListener('animationend', () => subEl.classList.remove('appearing'), { once: true });
+          }
+          subEl.dataset.subtaskId = sub.id;
+          subEl.tabIndex = 0;
+          subEl.setAttribute('role', 'listitem');
+          subEl.setAttribute('aria-label', `${sub.done ? 'Выполнено: ' : ''}${sub.text}`);
+          subEl.innerHTML = `
+            <button class="subtask-check" aria-label="${sub.done ? 'Вернуть подзадачу' : 'Отметить выполненной'}">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            </button>
+            <span class="subtask-text">${escapeHtml(sub.text)}</span>
+            <button class="subtask-delete" aria-label="Удалить подзадачу">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          `;
+          const checkBtn = subEl.querySelector('.subtask-check');
+          // Apply pop animation if this subtask was just toggled (Task 4.1)
+          if (_poppingSubtaskIds.has(sub.id)) {
+            _poppingSubtaskIds.delete(sub.id);
+            checkBtn.classList.add('popping');
+            checkBtn.addEventListener('animationend', () => checkBtn.classList.remove('popping'), { once: true });
+          }
+          checkBtn.addEventListener('click', () => toggleSubtask(group.id, sub.id));
+          subEl.querySelector('.subtask-delete').addEventListener('click', () => deleteSubtask(group.id, sub.id, subEl));
+          subList.appendChild(subEl);
+        });
+      }
+
+      body.appendChild(subList);
+
+      // Subtask input row
+      const inputRow = document.createElement('div');
+      inputRow.className = 'subtask-input-row';
+      inputRow.innerHTML = `
+        <input class="subtask-input" type="text" placeholder="Новая подзадача..." maxlength="200" autocomplete="off" />
+        <button class="subtask-add-btn" aria-label="Добавить подзадачу">+</button>
+      `;
+      const subInput  = inputRow.querySelector('.subtask-input');
+      const subAddBtn = inputRow.querySelector('.subtask-add-btn');
+
+      function handleAddSubtask() {
+        addSubtask(group.id, subInput.value);
+        subInput.value = '';
+        subInput.focus();
+      }
+      subAddBtn.addEventListener('click', handleAddSubtask);
+      subInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') handleAddSubtask();
+      });
+
+      body.appendChild(inputRow);
+      card.appendChild(body);
+
+      return card;
+    }
+
+    // ─── Render groups list ───────────────────────────────────────────
+    function renderGroups(state) {
+      const filtered = getFilteredGroups(state.groups, state.filter);
+
+      groupListEl.innerHTML = '';
+      filtered.forEach(group => {
+        const card = buildGroupEl(group, state.filter);
+        // Appear animation for new groups (Task 4.1)
+        if (_newGroupIds.has(group.id)) {
+          _newGroupIds.delete(group.id);
+          card.classList.add('appearing');
+          card.addEventListener('animationend', () => card.classList.remove('appearing'), { once: true });
+        }
+        groupListEl.appendChild(card);
+      });
+    }
+
+    // Register renderGroups into the master render chain and trigger initial render
+    _renderGroupsFn = renderGroups;
+    renderGroups(store.getState());
+
+    // ══════════════════════════════════════════════════════════════════════
+    //  ACCESSIBILITY & HOTKEYS (Task 4.2)
+    // ══════════════════════════════════════════════════════════════════════
+
+    const hotkeyHint = document.getElementById('hotkey-hint');
+    let hotkeyHintTimer = null;
+
+    function showHotkeyHint(html) {
+      clearTimeout(hotkeyHintTimer);
+      hotkeyHint.innerHTML = html;
+      hotkeyHint.classList.add('visible');
+      hotkeyHintTimer = setTimeout(() => hotkeyHint.classList.remove('visible'), 2000);
+    }
+
+    // ─── Get focused task id ──────────────────────────────────────────
+    function getFocusedTaskId() {
+      const el = document.activeElement;
+      if (el && el.classList.contains('todo-item')) return el.dataset.id;
+      return null;
+    }
+
+    // ─── Arrow key navigation between todo items ──────────────────────
+    document.getElementById('todo-list').addEventListener('keydown', (e) => {
+      const item = e.target.closest('.todo-item');
+      if (!item) return;
+
+      const items = [...document.querySelectorAll('#todo-list .todo-item')];
+      const idx = items.indexOf(item);
+
+      if (e.key === 'ArrowDown' || e.key === 'j') {
+        e.preventDefault();
+        const next = items[idx + 1];
+        if (next) next.focus();
+      }
+      if (e.key === 'ArrowUp' || e.key === 'k') {
+        e.preventDefault();
+        const prev = items[idx - 1];
+        if (prev) prev.focus();
+      }
+      // Enter or Space toggles the task
+      if (e.key === 'Enter' || e.key === ' ') {
+        if (e.target === item) {
+          e.preventDefault();
+          toggleTask(item.dataset.id);
+        }
+      }
+      // Delete or Backspace deletes the focused task
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (e.target === item) {
+          e.preventDefault();
+          const nextFocus = items[idx + 1] || items[idx - 1] || todoInput;
+          deleteTask(item.dataset.id);
+          requestAnimationFrame(() => {
+            setTimeout(() => nextFocus.focus(), 400);
+          });
+          showHotkeyHint('<kbd>Del</kbd> Задача удалена');
+        }
+      }
+    });
+
+    // ─── Subtask keyboard navigation ──────────────────────────────────
+    document.getElementById('group-list').addEventListener('keydown', (e) => {
+      const subItem = e.target.closest('.subtask-item');
+      if (!subItem) return;
+
+      const card = subItem.closest('.group-card');
+      if (!card) return;
+      const subs = [...card.querySelectorAll('.subtask-item')];
+      const idx = subs.indexOf(subItem);
+      const groupId = card.dataset.groupId;
+
+      if (e.key === 'ArrowDown' || e.key === 'j') {
+        e.preventDefault();
+        const next = subs[idx + 1];
+        if (next) next.focus();
+      }
+      if (e.key === 'ArrowUp' || e.key === 'k') {
+        e.preventDefault();
+        const prev = subs[idx - 1];
+        if (prev) prev.focus();
+      }
+      if (e.key === 'Enter' || e.key === ' ') {
+        if (e.target === subItem) {
+          e.preventDefault();
+          toggleSubtask(groupId, subItem.dataset.subtaskId);
+        }
+      }
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (e.target === subItem) {
+          e.preventDefault();
+          deleteSubtask(groupId, subItem.dataset.subtaskId, subItem);
+          showHotkeyHint('<kbd>Del</kbd> Подзадача удалена');
+        }
+      }
+    });
+
+    // ─── Global hotkeys ───────────────────────────────────────────────
+    document.addEventListener('keydown', (e) => {
+      // Skip if in input/textarea or modal is open
+      const tag = document.activeElement.tagName;
+      const inInput = tag === 'INPUT' || tag === 'TEXTAREA';
+      const modalOpen = groupModal.classList.contains('open') || bgPickerModal.classList.contains('open');
+      const pickerOpen = isPickerOpen();
+
+      // Ctrl+F or / — focus search/input
+      if ((e.ctrlKey && e.key === 'f') || (!inInput && !modalOpen && !pickerOpen && e.key === '/')) {
+        e.preventDefault();
+        todoInput.focus();
+        todoInput.select();
+        showHotkeyHint('<kbd>Ctrl+F</kbd> Фокус на поле ввода');
+        return;
+      }
+
+      // Escape — blur active element / close modal / close picker
+      if (e.key === 'Escape') {
+        if (pickerOpen) return; // handled by picker
+        if (modalOpen) return;  // handled by modal
+        if (inInput) {
+          document.activeElement.blur();
+          return;
+        }
+      }
+
+      // Only process remaining hotkeys when not in input
+      if (inInput || modalOpen || pickerOpen) return;
+
+      // N — new task (focus input)
+      if (e.key === 'n' || e.key === 'N') {
+        e.preventDefault();
+        todoInput.focus();
+        showHotkeyHint('<kbd>N</kbd> Новая задача');
+        return;
+      }
+
+      // G — create group
+      if (e.key === 'g' || e.key === 'G') {
+        e.preventDefault();
+        openGroupModal();
+        showHotkeyHint('<kbd>G</kbd> Новая группа');
+        return;
+      }
+
+      // 1, 2, 3 — filter tabs
+      if (e.key === '1') {
+        e.preventDefault();
+        store.setState({ filter: 'all' });
+        showHotkeyHint('<kbd>1</kbd> Все задачи');
+        return;
+      }
+      if (e.key === '2') {
+        e.preventDefault();
+        store.setState({ filter: 'active' });
+        showHotkeyHint('<kbd>2</kbd> Активные');
+        return;
+      }
+      if (e.key === '3') {
+        e.preventDefault();
+        store.setState({ filter: 'done' });
+        showHotkeyHint('<kbd>3</kbd> Готово');
+        return;
+      }
+
+      // T — toggle theme
+      if (e.key === 't' || e.key === 'T') {
+        e.preventDefault();
+        applyTheme(!html.classList.contains('dark'));
+        showHotkeyHint('<kbd>T</kbd> Переключить тему');
+        return;
+      }
+
+      // ? — show help
+      if (e.key === '?') {
+        e.preventDefault();
+        showHotkeyHint(
+          '<kbd>/</kbd> Поиск &nbsp; <kbd>N</kbd> Задача &nbsp; <kbd>G</kbd> Группа &nbsp; ' +
+          '<kbd>1-3</kbd> Фильтр &nbsp; <kbd>T</kbd> Тема &nbsp; ' +
+          '<kbd>↑↓</kbd> Навигация &nbsp; <kbd>Enter</kbd> Toggle &nbsp; <kbd>Del</kbd> Удалить'
+        );
+        clearTimeout(hotkeyHintTimer);
+        hotkeyHintTimer = setTimeout(() => hotkeyHint.classList.remove('visible'), 5000);
+        return;
+      }
+    });
+
+    // Init theme: stored preference → system preference
+    const storedTheme = store.getState().theme;
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    applyTheme(storedTheme ? storedTheme === 'dark' : prefersDark);
+
+    toggleBtn.addEventListener('click', () => {
+      applyTheme(!html.classList.contains('dark'));
+    });
+  </script>
+
+</body>
+</html>
