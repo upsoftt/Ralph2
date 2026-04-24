@@ -44,7 +44,7 @@ const AGENTS = {
     claude: {
         name: 'Claude Code',
         command: findClaude(),
-        args: ['--dangerously-skip-permissions', '--model', process.env.RALPH_MODEL || 'sonnet'],
+        args: ['--dangerously-skip-permissions', '--model', process.env.RALPH_MODEL || 'opus'],
         pty: { cols: 140, rows: 100, useConpty: true },
         env: { FORCE_COLOR: '1', ...(findGitBash() ? { CLAUDE_CODE_GIT_BASH_PATH: findGitBash() } : {}) },
         // Шаги автоматической загрузки (выполняются последовательно при boot)
