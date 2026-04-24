@@ -548,8 +548,31 @@ function sendCommand(ptyProc, cmd) {
 
     fs.appendFileSync(liveConsoleLog, formatted + '\n', 'utf8');
     renderScreen();
-    // КРИТИЧНО: PTY интерпретирует \n как Enter → заменяем на пробелы
-    ptyProc.write(cleanCmd.replace(/\n/g, ' ') + '\r');
+    writePromptToPty(ptyProc, cleanCmd);
+}
+
+/**
+ * Отправляет текст в Claude Code TUI и сабмитит его.
+ *
+ * Claude Code v2.1.119+ при длинном тексте (визуальный wrap в input)
+ * трактует одиночный \r как line-break внутри multiline input, а не как
+ * submit — промпт набирается, но не отправляется модели. Оборачиваем в
+ * bracketed paste (ESC[200~ ... ESC[201~): Claude принимает текст одним
+ * блоком без интерпретации управляющих символов; последующий \r после
+ * короткой задержки интерпретируется как submit.
+ *
+ * Также заменяем \n на пробелы — внутри bracketed paste \n тоже
+ * считается line-break. Одиночный \r в конце задержкой submit-ит.
+ */
+function writePromptToPty(ptyProc, cmd) {
+    const text = cmd.replace(/\r?\n/g, ' ');
+    try {
+        ptyProc.write('\x1b[200~' + text + '\x1b[201~');
+    } catch (e) { console.error('[error] pty_write_paste:', e.message); return; }
+    setTimeout(() => {
+        try { ptyProc.write('\r'); }
+        catch (e) { console.error('[error] pty_write_submit:', e.message); }
+    }, 400);
 }
 
 /**
@@ -567,7 +590,7 @@ function sendNudge(ptyProc, cmd) {
 
     fs.appendFileSync(liveConsoleLog, formatted + '\n', 'utf8');
     renderScreen();
-    ptyProc.write(cleanCmd.replace(/\n/g, ' ') + '\r');
+    writePromptToPty(ptyProc, cleanCmd);
 }
 
 /**
