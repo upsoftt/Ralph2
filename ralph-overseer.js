@@ -19,11 +19,71 @@ const agent = getAgent(agentName);
 
 const runnerDir = path.join(projectDir, '.ralph-runner');
 
-// Workspace: отдельная папка для Claude Code сессий (изоляция от пользовательских сессий)
+// Workspace: отдельная папка для Claude Code сессий (изоляция от пользовательских сессий).
+// Физически это Windows junction (mklink /J) на projectDir — агент видит все файлы проекта
+// по относительным путям, но CWD остаётся workspace-путём, поэтому Claude Code индексирует
+// JSONL-сессии отдельно от ручных сессий в projectDir.
 const ralphDir = path.dirname(process.argv[1] || __filename);
 const projectBaseName = path.basename(projectDir);
 const workspaceDir = path.join(ralphDir, 'workspaces', projectBaseName);
-if (!fs.existsSync(workspaceDir)) fs.mkdirSync(workspaceDir, { recursive: true });
+ensureWorkspaceJunction(projectDir, workspaceDir);
+
+function ensureWorkspaceJunction(target, link) {
+    try {
+        const workspacesRoot = path.dirname(link);
+        if (!fs.existsSync(workspacesRoot)) fs.mkdirSync(workspacesRoot, { recursive: true });
+
+        // Если projectDir и workspaceDir физически совпадают — пропускаем (редкий случай).
+        if (path.resolve(target) === path.resolve(link)) return;
+
+        if (fs.existsSync(link)) {
+            const st = fs.lstatSync(link);
+            if (st.isSymbolicLink()) {
+                // Проверим, что junction указывает именно на target. Если на другое — пересоздадим.
+                try {
+                    const current = fs.readlinkSync(link);
+                    if (path.resolve(current) === path.resolve(target)) return; // уже правильный
+                    // Указывает не туда — убьём и пересоздадим
+                    try { fs.rmSync(link, { recursive: false, force: true, maxRetries: 3 }); }
+                    catch (e) { console.error('[error] junction_stale_remove:', e.message); return; }
+                } catch (e) {
+                    // readlinkSync может падать на Windows junction в старых Node — считаем корректным
+                    return;
+                }
+            } else {
+                // Обычная папка. Если там только стаб CLAUDE.md (или пусто) — заменим junction-ом.
+                // Если реальный контент — не трогаем, пишем warning и работаем дальше как раньше.
+                const items = fs.readdirSync(link).filter(n => n !== '.' && n !== '..');
+                const onlyStub = items.length === 0 || (items.length === 1 && items[0] === 'CLAUDE.md');
+                if (!onlyStub) {
+                    console.error(`[warn] workspace ${link} содержит пользовательские файлы (${items.length} элементов), junction НЕ создаётся. Агент будет работать в этой папке.`);
+                    return;
+                }
+                try { fs.rmSync(link, { recursive: true, force: true, maxRetries: 3 }); }
+                catch (e) { console.error('[error] workspace_stub_remove:', e.message); return; }
+            }
+        }
+
+        // Создаём junction: cmd /c mklink /J "<link>" "<target>"
+        const { execFileSync } = require('child_process');
+        try {
+            execFileSync('cmd.exe', ['/c', 'mklink', '/J', link, target], { stdio: 'pipe' });
+        } catch (e) {
+            // Фолбэк: обычная папка со стаб-CLAUDE.md (старое поведение, чтобы не уронить overseer).
+            console.error('[error] junction_create:', e.message);
+            if (!fs.existsSync(link)) fs.mkdirSync(link, { recursive: true });
+            const stubPath = path.join(link, 'CLAUDE.md');
+            if (!fs.existsSync(stubPath)) {
+                fs.writeFileSync(stubPath,
+                    '# Ralph Workspace\n\nПроект расположен в: ' + target +
+                    '\nВсе файлы проекта находятся по абсолютным путям в этой директории.\n' +
+                    'Работай с файлами проекта используя абсолютные пути.\n', 'utf8');
+            }
+        }
+    } catch (e) {
+        console.error('[error] ensure_workspace_junction:', e.message);
+    }
+}
 
 const crashLog = path.join(runnerDir, 'crash.log');
 const liveConsoleLog = path.join(runnerDir, 'live_console_4.log');
@@ -187,7 +247,18 @@ function projectSlug(dir) {
     return dir.replace(/[^a-zA-Z0-9]/g, '-');
 }
 const claudeProjectsDir = path.join(process.env.HOME || process.env.USERPROFILE, '.claude', 'projects');
-// workspaceDir определяется выше — сессии хранятся по slug workspace, не проекта
+// workspaceDir определяется выше — сессии хранятся по slug workspace, не проекта.
+// Claude Code v2.1.117+ резолвит Windows junction в реальный путь перед вычислением
+// slug для JSONL-директории. Поэтому overseer ДОЛЖЕН резолвить workspaceDir так же,
+// иначе jsonlPath будет указывать в пустую папку и RALPH_READY не увидится.
+let workspaceDirResolved = workspaceDir;
+try {
+    workspaceDirResolved = fs.realpathSync.native
+        ? fs.realpathSync.native(workspaceDir)
+        : fs.realpathSync(workspaceDir);
+} catch (e) {
+    console.error('[warn] realpath workspaceDir failed, using as-is:', e.message);
+}
 let jsonlPath = '';
 let jsonlReadPos = 0; // Позиция чтения в JSONL файле (байты)
 let jsonlBuffer = ''; // Накопленный текст ответов Claude из JSONL
@@ -728,7 +799,7 @@ try {
         } else {
             sessionId = crypto.randomUUID();
         }
-        jsonlPath = path.join(claudeProjectsDir, projectSlug(workspaceDir), `${sessionId}.jsonl`);
+        jsonlPath = path.join(claudeProjectsDir, projectSlug(workspaceDirResolved), `${sessionId}.jsonl`);
         // При resume — читаем с конца существующего JSONL
         jsonlReadPos = 0;
         if (resumeSessionId && fs.existsSync(jsonlPath)) {
