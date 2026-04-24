@@ -412,6 +412,11 @@ def update_status():
         running = False
         paused = False
         running_version = "v4"
+        phase = None
+        recovery_label = None
+        next_try_at = None
+        dormant_reason = None
+        wait_label = None
         p_stat_file = os.path.join(str(proj.get("path", "")), ".ralph-runner", "status.json")
         if os.path.exists(p_stat_file):
             try:
@@ -420,6 +425,11 @@ def update_status():
                 target_pid = data.get('pid')
                 paused = data.get('paused', False)
                 running_version = data.get('version', 'v4')
+                phase = data.get('phase')
+                recovery_label = data.get('recovery_label')
+                next_try_at = data.get('next_try_at')
+                dormant_reason = data.get('dormant_reason')
+                wait_label = data.get('wait_label')
                 if data.get('running') and target_pid:
                     # Уровень 3: проверяем heartbeat — если старше 15 сек, процесс мёртв
                     heartbeat = data.get('heartbeat')
@@ -476,7 +486,37 @@ def update_status():
                     launch_running = any(p.poll() is None for p in procs)
                 else:
                     launch_running = procs.poll() is None
-        status_list.append({"id": proj["id"], "name": proj["name"], "path": str(proj["path"]), "total": total, "completed": done, "active": proj["id"] == ACTIVE_PROJECT_ID, "running": running, "paused": paused, "busy": BUSY_PROJECTS.get(proj["id"], False), "running_version": running_version, "all_done": all_done, "launch_available": launch_config is not None, "launch_description": launch_config.get("description", "") if launch_config else "", "launch_running": launch_running})
+
+        # Resume info: есть ли сохранённая привязка спринт→session для этого проекта.
+        # Если да — при Play overseer сделает --resume вместо новой сессии.
+        resume_available = False
+        resume_sprint_num = None
+        resume_sprint_title = None
+        resume_phase = None
+        try:
+            _proj_path = proj["path"]
+            ss_file = os.path.join(_proj_path, ".ralph-runner", "sprint_sessions.json")
+            if os.path.exists(ss_file):
+                with open(ss_file, 'r', encoding='utf-8') as ssf:
+                    sessions = json.loads(ssf.read() or '{}')
+                if sessions:
+                    # Берём минимальный номер спринта как "следующий resume-спринт"
+                    keys = sorted(sessions.keys(), key=lambda k: int(k) if str(k).isdigit() else 999)
+                    if keys:
+                        resume_sprint_num = int(keys[0]) if str(keys[0]).isdigit() else keys[0]
+                        resume_available = True
+            # Дополнительный контекст из status.json (phase, sprintTitle) — только если overseer не запущен,
+            # иначе это просто текущее состояние работающего спринта, а не "что будет при resume".
+            stf = os.path.join(_proj_path, ".ralph-runner", "status.json")
+            if resume_available and os.path.exists(stf):
+                with open(stf, 'r', encoding='utf-8') as stfh:
+                    stdata = json.loads(stfh.read() or '{}')
+                if not stdata.get('running'):
+                    resume_sprint_title = stdata.get('sprintTitle')
+                    resume_phase = stdata.get('phase')
+        except Exception as e: print(f"[error] read_resume_info: {e}")
+
+        status_list.append({"id": proj["id"], "name": proj["name"], "path": str(proj["path"]), "total": total, "completed": done, "active": proj["id"] == ACTIVE_PROJECT_ID, "running": running, "paused": paused, "busy": BUSY_PROJECTS.get(proj["id"], False), "running_version": running_version, "all_done": all_done, "launch_available": launch_config is not None, "launch_description": launch_config.get("description", "") if launch_config else "", "launch_running": launch_running, "resume_available": resume_available, "resume_sprint_num": resume_sprint_num, "resume_sprint_title": resume_sprint_title, "resume_phase": resume_phase, "phase": phase, "recovery_label": recovery_label, "next_try_at": next_try_at, "dormant_reason": dormant_reason, "wait_label": wait_label})
     spec_details = {}
     if active_proj:
         try:
@@ -751,15 +791,37 @@ class Handler(BaseHTTPRequestHandler):
             proj_path = project["path"]
 
             with _start_lock:
-                # Проверяем: не запущен ли уже Ralph Loop на этом проекте
+                # Проверяем: не запущен ли уже Ralph Loop на этом проекте.
+                # Блокируем Play ТОЛЬКО если: running=true И процесс жив по PID И heartbeat свежий (<120s).
+                # Если heartbeat устарел или PID мёртв — чистим status.json и продолжаем (это позволяет
+                # Play поднять overseer после крэша / OOM / переиспользованного PID).
                 stat_file = os.path.join(proj_path, ".ralph-runner", "status.json")
                 if os.path.exists(stat_file):
                     try:
                         with open(stat_file, 'r', encoding='utf-8') as sf:
                             st = json.loads(sf.read())
-                        if st.get('running') and st.get('pid') and _is_process_alive(st['pid']):
+                        stale = True
+                        hb = st.get('heartbeat')
+                        if hb:
+                            try:
+                                from datetime import timezone
+                                hb_time = datetime.fromisoformat(hb.replace('Z', '+00:00'))
+                                age = (datetime.now(timezone.utc) - hb_time).total_seconds()
+                                if age <= 120:
+                                    stale = False
+                            except Exception as e: print(f"[error] parse_heartbeat: {e}")
+                        proc_alive = bool(st.get('pid') and _is_process_alive(st['pid']))
+                        if st.get('running') and proc_alive and not stale:
                             self.send_json({"success": False, "error": f"Ralph уже запущен на этом проекте (PID {st['pid']})"})
                             return
+                        # Protocol-level cleanup: если running=true но либо PID мёртв, либо heartbeat protухший —
+                        # сбрасываем status в чистое состояние, чтобы свежий overseer не видел мусорные данные.
+                        if st.get('running') and (not proc_alive or stale):
+                            try:
+                                with open(stat_file, 'w', encoding='utf-8') as wf:
+                                    wf.write(json.dumps({"running": False, "version": "v4"}, indent=2))
+                                print(f"[auto-cleanup] Очищен stale status.json для {project.get('name', '?')} (alive={proc_alive}, stale_hb={stale})")
+                            except Exception as e: print(f"[error] cleanup_stale_status: {e}")
                     except Exception as e: print(f"[error] check_running_process: {e}")
 
                 overseer = RALPH_DIR / "ralph-overseer.js"
@@ -864,6 +926,51 @@ class Handler(BaseHTTPRequestHandler):
                 os._exit(0)
             import threading
             threading.Thread(target=restart_with_respawn, daemon=True).start()
+        elif p.path == "/api/wake":
+            # Wake up overseer из adaptive sleep (waiting_for_recovery / waiting_for_reset).
+            # Удаляет retry_state.json — overseer в sleepInterruptible видит отсутствие файла → просыпается.
+            pid = body.get('project_id')
+            project = next((p for p in PROJECTS if p['id'] == pid), None) or get_active_project()
+            if not project:
+                self.send_json({"success": False, "error": "Project not found"})
+                return
+            rs_file = Path(project["path"]) / ".ralph-runner" / "retry_state.json"
+            if rs_file.exists():
+                try:
+                    rs_file.unlink()
+                    self.send_json({"success": True, "woke": True})
+                    return
+                except Exception as e:
+                    self.send_json({"success": False, "error": str(e)})
+                    return
+            self.send_json({"success": True, "woke": False})
+        elif p.path == "/api/clear-sessions":
+            # Сброс привязки спринт→session: следующий Play начнёт СВЕЖУЮ сессию Claude Code.
+            # Используется когда контекст старой сессии устарел/сломан и нужен чистый старт.
+            pid = body.get('project_id')
+            project = next((p for p in PROJECTS if p['id'] == pid), None) or get_active_project()
+            if not project:
+                self.send_json({"success": False, "error": "Project not found"})
+                return
+            # Блокируем если overseer жив — нельзя менять state под работающим процессом.
+            stat_file = os.path.join(project["path"], ".ralph-runner", "status.json")
+            if os.path.exists(stat_file):
+                try:
+                    with open(stat_file, 'r', encoding='utf-8') as sf:
+                        st = json.loads(sf.read() or '{}')
+                    if st.get('running') and st.get('pid') and _is_process_alive(st['pid']):
+                        self.send_json({"success": False, "error": "Сначала остановите overseer (Stop), потом очищайте сессию."})
+                        return
+                except Exception as e: print(f"[error] check_running_before_clear: {e}")
+            ss_file = Path(project["path"]) / ".ralph-runner" / "sprint_sessions.json"
+            if ss_file.exists():
+                try:
+                    ss_file.unlink()
+                    print(f"[clear-sessions] Удалён {ss_file}")
+                except Exception as e:
+                    self.send_json({"success": False, "error": str(e)})
+                    return
+            self.send_json({"success": True})
         elif p.path == "/api/clear-stream":
             project = get_active_project()
             if not project:
@@ -1417,6 +1524,10 @@ def get_dashboard_html():
     .icon-btn { background: rgba(255,255,255,0.05); border: 1px solid var(--border); color: var(--text-dim); cursor: pointer; padding: 6px; border-radius: 6px; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
     .icon-btn:hover { color: var(--text); background: rgba(255,255,255,0.15); }
     .icon-btn.start { color: var(--green); border-color: rgba(63,185,80,0.3); }
+    .icon-btn.start.resume-available { font-size: 14px; font-weight: 700; line-height: 14px; }
+    .icon-btn.start.resume-available::after { content: ""; position: absolute; inset: -2px; border-radius: 8px; box-shadow: 0 0 0 0 rgba(245,183,58,0.6); animation: resumePulse 2s ease-out infinite; pointer-events: none; }
+    .icon-btn.start.resume-available { position: relative; }
+    @keyframes resumePulse { 0% { box-shadow: 0 0 0 0 rgba(245,183,58,0.5); } 70% { box-shadow: 0 0 0 6px rgba(245,183,58,0); } 100% { box-shadow: 0 0 0 0 rgba(245,183,58,0); } }
     .icon-btn.stop { color: var(--red); border-color: rgba(248,81,73,0.3); }
     .model-toggle { display:none; align-items:center; gap:0; border-radius:5px; overflow:hidden; border:1px solid var(--border); font-size:0.7em; font-weight:700; height:28px; }
     .model-toggle .mt-opt { padding:4px 8px; cursor:pointer; transition:0.2s; color:var(--text-dim); background:transparent; user-select:none; }
@@ -1594,6 +1705,7 @@ def get_dashboard_html():
     <div class="menu-item success" onclick="handleMenu(event, 'start')"><span id="m-icon-run"></span> <span id="m-text-run"></span></div>
     <div class="menu-item" id="m-item-pause" style="display:none;" onclick="handleMenu(event, 'pause')"><span id="m-icon-pause"></span> <span id="m-text-pause">Пауза</span></div>
     <div class="menu-item" onclick="handleMenu(event, 'restart')"><span id="m-icon-restart"></span> Перезапустить</div>
+    <div class="menu-item warning" id="m-item-clear-sessions" style="display:none;" onclick="handleMenu(event, 'clear-sessions')"><span style="font-size:14px;line-height:14px">↻</span> Начать спринт заново (очистить session)</div>
     <div class="menu-item warning" onclick="handleMenu(event, 'crash')"><span id="m-icon-crash"></span> Лог ошибок (crash.log)</div>
     <div class="menu-item" onclick="handleMenu(event, 'gen')"><span id="m-icon-gen"></span> Сгенерировать спецификации</div>
     <div class="menu-item" onclick="handleMenu(event, 'collect')"><span id="m-icon-collect"></span> Собрать результаты</div>
@@ -1716,6 +1828,12 @@ def get_dashboard_html():
         setLock(pid, 'pausing');
         await fetch('/api/pause', { method: 'POST', body: JSON.stringify({ project_id: pid }) });
         setTimeout(clearLock, 2000);
+    }
+
+    async function wakeRun(pid) {
+        // Удаляет retry_state.json — overseer в adaptive sleep видит и просыпается на следующих 5с
+        await fetch('/api/wake', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ project_id: pid }) });
+        refresh();
     }
 
     function customConfirm(msg, x, y, onConfirm) {
@@ -1927,11 +2045,34 @@ def get_dashboard_html():
                     const labels = {starting:'Запускается...', stopping:'Останавливается...', pausing:'Пауза...', launch_stopping:'Останавливаю...'};
                     controls = `<span style="display:flex;align-items:center;gap:6px;color:var(--text-dim);font-size:0.75em;" title="${labels[lockAction]||''}">${spinnerHtml} ${labels[lockAction]||''}</span>`;
                 } else if (p.running) {
-                    controls = `
-                        <button class="icon-btn stop" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" onclick="event.stopPropagation(); stopRun('${escAttr(p.id)}')" title="Остановить Ralph">${ICONS.stop}</button>
-                        <button class="icon-btn" style="color:var(--blue); border-color:rgba(88,166,255,0.3)" onclick="event.stopPropagation(); showServerLogs()" title="Показать консоль"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg></button>
-                        <button class="icon-btn ${p.paused?'start':'pause'}" style="${p.paused?'color:var(--orange);border-color:var(--orange)':''}" onclick="event.stopPropagation(); togglePause('${escAttr(p.id)}')" title="${p.paused?'Продолжить':'Пауза'}">${p.paused?ICONS.play:ICONS.pause}</button>
-                    `;
+                    // Adaptive sleep / dormant state — показываем Wake-кнопку вместо обычных контролов
+                    const inWaiting = p.phase === 'waiting_for_recovery' || p.phase === 'waiting_for_reset';
+                    const inDormant = p.phase === 'dormant';
+                    if (inWaiting) {
+                        let waitText = p.recovery_label || p.wait_label || 'Ожидание';
+                        let countdown = '';
+                        if (p.next_try_at) {
+                            const remain = Math.max(0, Math.round((new Date(p.next_try_at) - new Date()) / 1000));
+                            const h = Math.floor(remain / 3600), m = Math.floor((remain % 3600) / 60), s = remain % 60;
+                            countdown = h > 0 ? `${h}ч${m}м` : (m > 0 ? `${m}м${s}с` : `${s}с`);
+                        }
+                        controls = `
+                            <span style="display:flex;align-items:center;gap:4px;color:#f5b73a;font-size:0.7em;font-weight:600;padding:2px 6px;background:rgba(245,183,58,0.1);border-radius:4px;" title="${esc(waitText)}">⏸ ${countdown ? esc(countdown) : '...'}</span>
+                            <button class="icon-btn" style="color:#f5b73a; border-color:rgba(245,183,58,0.5)" onclick="event.stopPropagation(); wakeRun('${escAttr(p.id)}')" title="Разбудить (пропустить ожидание)">${ICONS.play}</button>
+                            <button class="icon-btn stop" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" onclick="event.stopPropagation(); stopRun('${escAttr(p.id)}')" title="Остановить">${ICONS.stop}</button>
+                        `;
+                    } else if (inDormant) {
+                        controls = `
+                            <span style="display:flex;align-items:center;gap:4px;color:#ff6b80;font-size:0.7em;font-weight:600;padding:2px 6px;background:rgba(255,107,128,0.1);border-radius:4px;" title="${esc(p.dormant_reason||'')}">💤 dormant</span>
+                            <button class="icon-btn stop" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" onclick="event.stopPropagation(); stopRun('${escAttr(p.id)}')" title="Остановить">${ICONS.stop}</button>
+                        `;
+                    } else {
+                        controls = `
+                            <button class="icon-btn stop" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" onclick="event.stopPropagation(); stopRun('${escAttr(p.id)}')" title="Остановить Ralph">${ICONS.stop}</button>
+                            <button class="icon-btn" style="color:var(--blue); border-color:rgba(88,166,255,0.3)" onclick="event.stopPropagation(); showServerLogs()" title="Показать консоль"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg></button>
+                            <button class="icon-btn ${p.paused?'start':'pause'}" style="${p.paused?'color:var(--orange);border-color:var(--orange)':''}" onclick="event.stopPropagation(); togglePause('${escAttr(p.id)}')" title="${p.paused?'Продолжить':'Пауза'}">${p.paused?ICONS.play:ICONS.pause}</button>
+                        `;
+                    }
                 } else if (p.all_done && p.total > 0) {
                     // Все задачи выполнены — показываем Launch вместо Play
                     controls = '';
@@ -1942,7 +2083,7 @@ def get_dashboard_html():
                             <div class="mt-opt ${m==='sonnet'?'active-sonnet':''}" onclick="projectModels['${escAttr(p.id)}']='sonnet'; saveModels(); refresh();" title="Sonnet (быстрая, дешёвая)">Sonnet</div>
                             <div class="mt-opt ${m==='opus'?'active-opus':''}" onclick="projectModels['${escAttr(p.id)}']='opus'; saveModels(); refresh();" title="Opus 4.6 (самая мощная)">Opus</div>
                         </div>
-                        <button class="icon-btn start" title="Запуск Ralph (${m==='opus'?'Opus 4.6':'Sonnet'})" style="color:#00e5ff; border-color:rgba(0,229,255,0.3)" ${p.busy?'disabled':''} onclick="event.stopPropagation(); toggleRun4('${escAttr(p.id)}')">${ICONS.play}</button>
+                        <button class="icon-btn start ${p.resume_available?'resume-available':''}" title="${p.resume_available ? 'Продолжить спринт '+p.resume_sprint_num+(p.resume_phase?' (фаза: '+p.resume_phase+')':'')+' — resume сессии Claude Code' : 'Запуск Ralph ('+(m==='opus'?'Opus 4.6':'Sonnet')+')'}" style="color:${p.resume_available?'#f5b73a':'#00e5ff'}; border-color:${p.resume_available?'rgba(245,183,58,0.5)':'rgba(0,229,255,0.3)'}" ${p.busy?'disabled':''} onclick="event.stopPropagation(); toggleRun4('${escAttr(p.id)}')">${p.resume_available?'↻':ICONS.play}</button>
                     `;
                 }
                 const statusDot = p.running
@@ -1957,7 +2098,7 @@ def get_dashboard_html():
                         ? `<button class="launch-btn running" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchStop('${escAttr(p.id)}')" title="${launchTitle}">${ICONS.stop}</button>`
                         : `<button class="launch-btn" style="padding:2px 8px;font-size:0.75em;flex-shrink:0" onclick="event.stopPropagation(); launchProject('${escAttr(p.id)}')" title="${launchTitle}">${ICONS.launch}</button>`;
                 }
-                return `<div class="project-item ${p.active?'active':''}" onclick="setProject('${escAttr(p.id)}')" oncontextmenu="event.preventDefault(); showMenu(event, '${escAttr(p.id)}', ${p.running}, ${!!p.busy}, ${!!p.paused}, ${!!(p.all_done && p.total > 0)})">
+                return `<div class="project-item ${p.active?'active':''}" onclick="setProject('${escAttr(p.id)}')" oncontextmenu="event.preventDefault(); showMenu(event, '${escAttr(p.id)}', ${p.running}, ${!!p.busy}, ${!!p.paused}, ${!!(p.all_done && p.total > 0)}, ${!!p.resume_available})">
                     <div class="project-row1">
                         <div class="project-row1-left">${statusDot}<strong class="project-name-text" title="${esc(p.name)}">${esc(p.name)}</strong>${p.busy ? '<span class="busy-badge" style="font-size:0.7em;padding:1px 7px"><span class="busy-spinner" style="width:10px;height:10px"></span>'+esc(p.busy)+'</span>' : ''}</div>
                         <div class="project-row1-right">${controls}</div>
@@ -2160,8 +2301,8 @@ def get_dashboard_html():
         }
     }
 
-        function showMenu(e, id, running, busy, paused, allDone) {
-            e.stopPropagation(); menuTarget = { id, running, busy, paused, allDone };
+        function showMenu(e, id, running, busy, paused, allDone, resumeAvailable) {
+            e.stopPropagation(); menuTarget = { id, running, busy, paused, allDone, resumeAvailable };
             menuX = e.clientX; menuY = e.clientY;
             const menu = document.getElementById('ctxMenu');
             menu.style.display = 'block';
@@ -2202,6 +2343,12 @@ def get_dashboard_html():
             } else {
                 pauseItem.style.display = 'none';
             }
+
+            // Пункт "Начать спринт заново" — только если есть сохранённая session и overseer НЕ запущен
+            const clearSessItem = document.getElementById('m-item-clear-sessions');
+            if (clearSessItem) {
+                clearSessItem.style.display = (menuTarget.resumeAvailable && !running) ? 'flex' : 'none';
+            }
         }
         async function handleMenu(e, type) {
             e.stopPropagation();
@@ -2232,6 +2379,15 @@ def get_dashboard_html():
             document.getElementById('ctxMenu').style.display = 'none';
             customConfirm(`Сброс Ralph: прогресс (галочки), результаты и логи будут очищены.<br><br>Исходный код проекта <b>не затрагивается</b>.<br><br>Продолжить?`, menuX, menuY, async () => {
                 await fetch('/api/reset-ralph', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:id})});
+                refresh();
+            });
+        }
+        else if (type === 'clear-sessions') {
+            document.getElementById('ctxMenu').style.display = 'none';
+            customConfirm('Очистить привязку текущего спринта к сессии Claude Code?<br><br>Следующий Play запустит <b>новую сессию</b> — Claude начнёт спринт с нуля, без памяти о предыдущих попытках.<br><br>Прогресс задач и результаты <b>не затрагиваются</b>.', menuX, menuY, async () => {
+                const r = await fetch('/api/clear-sessions', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({project_id:id})});
+                const j = await r.json().catch(()=>({}));
+                if (!j.success && j.error) { alert(j.error); }
                 refresh();
             });
         }

@@ -19,3 +19,9 @@ build/
 mempalace.yaml
 entities.json
 python
+
+# Claude Code per-user state (settings.local.json, scheduled tasks, и т.д.) — не для репо
+.claude/
+
+# Workspaces — Windows junction'ы на реальные проекты, не должны быть в git
+workspaces/

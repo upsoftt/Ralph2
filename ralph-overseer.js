@@ -157,6 +157,20 @@ function writeStatus(running, extra = {}) {
     } catch (e) { console.error('[error] write_status:', e.message); }
 }
 
+// Merge-обновление status.json — сохраняет существующие поля (sprint, phase, sprintTitle
+// и т.д.), пишет только переданные. Используется для фазовых переходов и паузы,
+// чтобы они не перетирали контекст текущего спринта.
+function updateStatus(partial) {
+    try {
+        let existing = {};
+        if (fs.existsSync(statusFile)) {
+            try { existing = JSON.parse(fs.readFileSync(statusFile, 'utf8')); } catch {}
+        }
+        const merged = { ...existing, ...partial, heartbeat: new Date().toISOString() };
+        atomicWriteFileSync(statusFile, JSON.stringify(merged, null, 2));
+    } catch (e) { console.error('[error] update_status:', e.message); }
+}
+
 // Уровень 3: Heartbeat — обновляем timestamp каждые 5 секунд
 setInterval(() => {
     try {
@@ -175,6 +189,483 @@ function clearStatus() {
         atomicWriteFileSync(statusFile, JSON.stringify({ running: false, version: 'v4' }));
     } catch (e) { console.error('[error] clear_status:', e.message); }
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// ─── RESILIENCE LAYER ───────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
+// Канонический task_state.json + reconciler + lock + retry state + enforcer log.
+// Эти компоненты обеспечивают auto-recovery после crash/limit/network blip
+// и защищают tasks.md/spec.md от самовольных правок Claude (ставит [x] игнорируя
+// инструкции, потому что CLAUDE.md проектов часто прямо требует это).
+
+const taskStateFile = path.join(runnerDir, 'task_state.json');
+const retryStateFile = path.join(runnerDir, 'retry_state.json');
+const lockFile = path.join(runnerDir, 'overseer.lock');
+const enforcerLog = path.join(runnerDir, 'enforcer.log');
+
+// ─── LOCK ────────────────────────────────────────────────────────────────
+function acquireLock() {
+    try {
+        if (fs.existsSync(lockFile)) {
+            const data = fs.readFileSync(lockFile, 'utf8').trim();
+            const oldPid = parseInt(data);
+            if (oldPid && oldPid !== process.pid) {
+                try {
+                    const check = require('child_process').execSync(
+                        `tasklist /FI "PID eq ${oldPid}" /NH`,
+                        { encoding: 'utf8', timeout: 5000 }
+                    );
+                    if (check.includes(String(oldPid))) {
+                        console.error(`\n❌ Ralph overseer уже запущен на этом проекте (PID ${oldPid}, lock-файл существует). Выход.\n`);
+                        process.exit(2);
+                    }
+                } catch (e) { /* tasklist failed = считаем процесс мёртвым */ }
+            }
+        }
+        atomicWriteFileSync(lockFile, String(process.pid));
+    } catch (e) { console.error('[error] acquire_lock:', e.message); }
+}
+
+function releaseLock() {
+    try {
+        if (fs.existsSync(lockFile)) {
+            const data = fs.readFileSync(lockFile, 'utf8').trim();
+            if (parseInt(data) === process.pid) fs.unlinkSync(lockFile);
+        }
+    } catch (e) { console.error('[error] release_lock:', e.message); }
+}
+
+// ─── ENFORCER LOG ─────────────────────────────────────────────────────────
+function enforcerLogAppend(msg) {
+    try {
+        // rotation: если >5MB — обрезать до последнего 1MB
+        if (fs.existsSync(enforcerLog)) {
+            const sz = fs.statSync(enforcerLog).size;
+            if (sz > 5 * 1024 * 1024) {
+                const fd = fs.openSync(enforcerLog, 'r');
+                const keepBytes = 1024 * 1024;
+                const buf = Buffer.alloc(keepBytes);
+                fs.readSync(fd, buf, 0, keepBytes, sz - keepBytes);
+                fs.closeSync(fd);
+                fs.writeFileSync(enforcerLog, '[...truncated...]\n' + buf.toString('utf8'), 'utf8');
+            }
+        }
+        fs.appendFileSync(enforcerLog, `[${new Date().toISOString()}] ${msg}\n`, 'utf8');
+    } catch (e) { console.error('[error] enforcer_log:', e.message); }
+}
+
+// ─── TASK STATE (canonical) ──────────────────────────────────────────────
+// Schema: { taskId: { sprint, title, status: 'pending'|'done', report_collected, sessionId, marked_done_at } }
+function loadTaskState() {
+    try {
+        if (!fs.existsSync(taskStateFile)) return {};
+        const raw = fs.readFileSync(taskStateFile, 'utf8');
+        return JSON.parse(raw);
+    } catch (e) {
+        // Corrupted — переименовать и вернуть пустой; reconciler ниже re-import'нёт из tasks.md
+        try {
+            const corruptedPath = `${taskStateFile}.corrupted-${Date.now()}`;
+            fs.renameSync(taskStateFile, corruptedPath);
+            enforcerLogAppend(`task_state.json corrupted, renamed to ${path.basename(corruptedPath)}: ${e.message}`);
+        } catch (e2) { console.error('[error] task_state_corrupted_rename:', e2.message); }
+        return {};
+    }
+}
+
+function saveTaskState(state) {
+    try {
+        atomicWriteFileSync(taskStateFile, JSON.stringify(state, null, 2));
+    } catch (e) { console.error('[error] save_task_state:', e.message); }
+}
+
+// Парсит tasks.md и spec.md, возвращает {taskId: {sprint, title, marked_x_in_md}}
+function scanTasksFiles() {
+    const result = {};
+    const tasksMd = path.join(projectDir, 'tasks.md');
+    if (fs.existsSync(tasksMd)) {
+        try {
+            const content = fs.readFileSync(tasksMd, 'utf8');
+            const re = /^-\s+\[([ x])\]\s+\{\{TASK:(\d+\.\d+)\}\}\s*(.*)$/gm;
+            let m;
+            while ((m = re.exec(content)) !== null) {
+                const id = m[2];
+                if (!result[id]) {
+                    result[id] = { sprint: id.split('.')[0], title: m[3].trim(), marked_x_in_md: m[1] === 'x' };
+                } else {
+                    result[id].marked_x_in_md = result[id].marked_x_in_md || (m[1] === 'x');
+                }
+            }
+        } catch (e) { console.error('[error] scan_tasks_md:', e.message); }
+    }
+    if (fs.existsSync(specsDir)) {
+        const walk = (dir) => {
+            try {
+                fs.readdirSync(dir).forEach(f => {
+                    const p = path.join(dir, f);
+                    try {
+                        const st = fs.statSync(p);
+                        if (st.isDirectory()) walk(p);
+                        else if (f === 'spec.md') {
+                            const c = fs.readFileSync(p, 'utf8');
+                            const re = /^-\s+\[([ x])\]\s+[\s\S]*?\{\{TASK:(\d+\.\d+)\}\}/gm;
+                            let m;
+                            while ((m = re.exec(c)) !== null) {
+                                const id = m[2];
+                                if (!result[id]) {
+                                    result[id] = { sprint: id.split('.')[0], title: '', marked_x_in_md: m[1] === 'x' };
+                                } else {
+                                    result[id].marked_x_in_md = result[id].marked_x_in_md || (m[1] === 'x');
+                                }
+                            }
+                        }
+                    } catch {}
+                });
+            } catch {}
+        };
+        walk(specsDir);
+    }
+    return result;
+}
+
+// При первом запуске или если tasks.md новее task_state.json — импорт.
+// Каждая задача: pending→done определяется по [x] в md И наличию results/<id>.json.
+function importTaskStateFromMd() {
+    const scanned = scanTasksFiles();
+    const existing = loadTaskState();
+    const merged = {};
+    for (const [id, info] of Object.entries(scanned)) {
+        const safeId = id.replace(/\./g, '_');
+        const resultFile = path.join(resultsDir, `${safeId}.json`);
+        const reportExists = fs.existsSync(resultFile);
+        const prev = existing[id] || {};
+
+        // Правило: задача = done только если есть [x] в md AND results/<id>.json существует.
+        // Это защита от ложно-зелёных ([x] без отчёта = недозакрытая задача).
+        const isDone = info.marked_x_in_md && reportExists;
+
+        merged[id] = {
+            sprint: info.sprint,
+            title: info.title || prev.title || '',
+            status: isDone ? 'done' : 'pending',
+            report_collected: reportExists,
+            sessionId: prev.sessionId || null,
+            marked_done_at: isDone ? (prev.marked_done_at || new Date().toISOString()) : null,
+        };
+    }
+    saveTaskState(merged);
+    return merged;
+}
+
+// Reconciler: гарантирует, что tasks.md и spec.md отражают task_state.json.
+// Если в md есть [x] для задач со status≠done — откатывает на [ ]. И наоборот.
+let _reconcilerWriting = false; // защита от рекурсии fs.watch
+
+function renderExpectedMark(state, id) {
+    const t = state[id];
+    if (!t) return null; // задача не в state — не трогаем
+    return (t.status === 'done' && t.report_collected) ? 'x' : ' ';
+}
+
+function reconcileFile(filePath, state) {
+    if (!fs.existsSync(filePath)) return false;
+    let changed = false;
+    const log = [];
+    try {
+        const original = fs.readFileSync(filePath, 'utf8');
+        const re = /^(-\s+\[)([ x])(\]\s+(?:[\s\S]*?\{\{TASK:(\d+\.\d+)\}\}|\{\{TASK:(\d+\.\d+)\}\}.*))$/gm;
+        const updated = original.replace(re, (full, prefix, mark, rest, id1, id2) => {
+            const id = id1 || id2;
+            const expected = renderExpectedMark(state, id);
+            if (expected === null) return full; // не наша забота
+            if (mark !== expected) {
+                changed = true;
+                log.push(`${path.relative(projectDir, filePath)}: TASK ${id} ${mark}→${expected}`);
+                return prefix + expected + rest;
+            }
+            return full;
+        });
+        if (changed) {
+            _reconcilerWriting = true;
+            try {
+                atomicWriteFileSync(filePath, updated);
+            } finally {
+                // Сброс флага через 200мс (позволяет fs.watch event пройти и быть проигнорированным)
+                setTimeout(() => { _reconcilerWriting = false; }, 200);
+            }
+            for (const l of log) enforcerLogAppend(`reconcile ${l}`);
+        }
+        return changed;
+    } catch (e) {
+        console.error(`[error] reconcile_file ${filePath}:`, e.message);
+        return false;
+    }
+}
+
+function reconcileAllFiles() {
+    const state = loadTaskState();
+    if (Object.keys(state).length === 0) return; // не реконсайлим если state пуст
+    let any = false;
+    const tasksMd = path.join(projectDir, 'tasks.md');
+    if (reconcileFile(tasksMd, state)) any = true;
+    if (fs.existsSync(specsDir)) {
+        const walk = (dir) => {
+            try {
+                fs.readdirSync(dir).forEach(f => {
+                    const p = path.join(dir, f);
+                    try {
+                        const st = fs.statSync(p);
+                        if (st.isDirectory()) walk(p);
+                        else if (f === 'spec.md') { if (reconcileFile(p, state)) any = true; }
+                    } catch {}
+                });
+            } catch {}
+        };
+        walk(specsDir);
+    }
+    return any;
+}
+
+// markTaskCollected — официальный путь для overseer пометить задачу как закрытую.
+// Используется ПОСЛЕ получения RALPH_RESULT и записи results/<id>.json.
+function markTaskCollected(taskId, sessionId) {
+    const state = loadTaskState();
+    if (!state[taskId]) {
+        // Задача не в state — досканировать
+        Object.assign(state, importTaskStateFromMd());
+    }
+    if (state[taskId]) {
+        state[taskId].status = 'done';
+        state[taskId].report_collected = true;
+        state[taskId].marked_done_at = new Date().toISOString();
+        if (sessionId) state[taskId].sessionId = sessionId;
+        saveTaskState(state);
+        reconcileAllFiles(); // отрендерит [x] в tasks.md и spec.md
+    }
+}
+
+// Enforcer file watcher — реактивный триггер reconcile (defense-in-depth).
+// Основная гарантия — periodic reconcile (ниже), это просто ускоряет реакцию.
+let enforcerWatchers = [];
+let enforcerEnabled = false; // включается после grace period в startup
+
+function startEnforcer() {
+    enforcerEnabled = true;
+    const debounced = debounce(() => {
+        if (!enforcerEnabled) return;
+        if (_reconcilerWriting) return;
+        try {
+            const before = fs.readFileSync(path.join(projectDir, 'tasks.md'), 'utf8');
+            const changed = reconcileAllFiles();
+            if (changed) {
+                // Если был откат — отправить nudge Claude (если PTY жив)
+                try {
+                    if (typeof ptyProcess !== 'undefined' && ptyProcess) {
+                        ptyProcess.write('\nИзменения в tasks.md/spec.md были автоматически откачены overseer\'ом. Не ставь самостоятельно [x] — overseer сам отметит задачи после получения RALPH_RESULT.\n');
+                    }
+                } catch {}
+            }
+        } catch {}
+    }, 250);
+
+    const watch = (filePath) => {
+        try {
+            if (!fs.existsSync(filePath)) return;
+            const w = fs.watch(filePath, { persistent: true }, () => {
+                try { debounced(); } catch (e) { console.error('[error] enforcer_callback:', e.message); }
+            });
+            // Critical: fs.watch на Windows может выкинуть EPERM на atomic write (tmp+rename).
+            // Без error handler — это uncaughtException и death overseer'а. Логируем, не падаем.
+            w.on('error', (e) => {
+                console.error(`[warn] enforcer_watch_error ${filePath}:`, e.message);
+                try { enforcerLogAppend(`watch_error ${path.relative(projectDir, filePath)}: ${e.message}`); } catch {}
+                // Не пытаемся пере-watch'ить — periodic reconcile (30s) подхватит изменения.
+            });
+            enforcerWatchers.push(w);
+        } catch (e) { console.error('[error] enforcer_watch_setup:', e.message); }
+    };
+    watch(path.join(projectDir, 'tasks.md'));
+    if (fs.existsSync(specsDir)) {
+        const walk = (dir) => {
+            try {
+                fs.readdirSync(dir).forEach(f => {
+                    const p = path.join(dir, f);
+                    try {
+                        const st = fs.statSync(p);
+                        if (st.isDirectory()) walk(p);
+                        else if (f === 'spec.md') watch(p);
+                    } catch {}
+                });
+            } catch {}
+        };
+        walk(specsDir);
+    }
+}
+
+function stopEnforcer() {
+    enforcerEnabled = false;
+    for (const w of enforcerWatchers) { try { w.close(); } catch {} }
+    enforcerWatchers = [];
+}
+
+function debounce(fn, ms) {
+    let t = null;
+    return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+// Periodic reconcile (defense-in-depth, на случай если fs.watch промахнётся).
+setInterval(() => {
+    if (enforcerEnabled && !_reconcilerWriting) {
+        try { reconcileAllFiles(); } catch {}
+    }
+}, 30000);
+
+// ─── RETRY STATE ─────────────────────────────────────────────────────────
+function loadRetryState() {
+    try {
+        if (!fs.existsSync(retryStateFile)) return null;
+        return JSON.parse(fs.readFileSync(retryStateFile, 'utf8'));
+    } catch { return null; }
+}
+
+function saveRetryState(rs) {
+    try { atomicWriteFileSync(retryStateFile, JSON.stringify(rs, null, 2)); }
+    catch (e) { console.error('[error] save_retry_state:', e.message); }
+}
+
+function clearRetryState() {
+    try { if (fs.existsSync(retryStateFile)) fs.unlinkSync(retryStateFile); }
+    catch (e) { console.error('[error] clear_retry_state:', e.message); }
+}
+
+// Stop-reactive sleep: ждёт до timeMs, проверяя stopFile/pauseFile/wake (clearRetryState) каждые 5с.
+async function sleepInterruptible(untilTimeMs, label) {
+    while (Date.now() < untilTimeMs) {
+        if (fs.existsSync(stopFile)) return 'stop';
+        if (fs.existsSync(pauseFile)) return 'pause';
+        if (!fs.existsSync(retryStateFile)) return 'wake'; // wake-up через POST /api/wake
+        const remainSec = Math.max(0, Math.round((untilTimeMs - Date.now()) / 1000));
+        if (remainSec % 30 === 0) {
+            try {
+                updateStatus({ phase: 'waiting_for_reset', wait_label: label, next_try_at: new Date(untilTimeMs).toISOString(), remaining_sec: remainSec });
+            } catch {}
+        }
+        await new Promise(r => setTimeout(r, 5000));
+    }
+    return 'timeout';
+}
+
+// ─── PATTERN DETECTOR ────────────────────────────────────────────────────
+// Table-driven парсинг PTY output. Одна функция, разные реакции.
+const PATTERN_TABLE = [
+    {
+        name: 'limit_with_reset',
+        re: /You['’]ve hit your limit\s*[·•\-]+\s*resets\s+(\d{1,2}):?(\d{2})?\s*(am|pm)?/i,
+        action: 'sleep_until_reset',
+    },
+    {
+        name: 'limit_extra_usage',
+        re: /\/extra-usage to finish what you['’]re working on/i,
+        action: 'sleep_short_then_retry',
+    },
+    {
+        name: 'rate_limit_generic',
+        re: /(rate limit|usage limit reached|too many requests)/i,
+        action: 'backoff',
+    },
+    {
+        name: 'auth_required',
+        re: /(authentication required|please run \/login|api key|session expired)/i,
+        action: 'stop_manual',
+    },
+    {
+        name: 'context_overflow',
+        re: /(context length exceeded|context too long|prompt is too long)/i,
+        action: 'inject_compact',
+    },
+    {
+        name: 'network_error',
+        re: /(network error|connection refused|ECONNRESET|ETIMEDOUT)/i,
+        action: 'backoff_short',
+    },
+    {
+        name: 'internal_server_error',
+        re: /(internal server error|500 Internal|503 Service|api error: 5\d\d)/i,
+        action: 'backoff_short',
+    },
+];
+
+let _lastPatternMatch = { name: null, ts: 0 }; // дедупликация повторных matches
+
+function detectPattern(textChunk) {
+    for (const p of PATTERN_TABLE) {
+        const m = textChunk.match(p.re);
+        if (m) {
+            // дедупликация: один и тот же pattern в течение 30 сек игнорируем
+            const now = Date.now();
+            if (_lastPatternMatch.name === p.name && now - _lastPatternMatch.ts < 30000) continue;
+            _lastPatternMatch = { name: p.name, ts: now };
+            return { ...p, match: m };
+        }
+    }
+    return null;
+}
+
+// Парсит время "4pm (Europe/Moscow)" / "16:00" из match'а — возвращает Date следующего такого момента.
+function parseResetTime(match) {
+    const h = parseInt(match[1]);
+    const min = match[2] ? parseInt(match[2]) : 0;
+    const ampm = (match[3] || '').toLowerCase();
+    let hour = h;
+    if (ampm === 'pm' && h < 12) hour += 12;
+    if (ampm === 'am' && h === 12) hour = 0;
+    const now = new Date();
+    let target = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, min, 0);
+    if (target <= now) target = new Date(target.getTime() + 24 * 3600 * 1000); // следующий день
+    return target;
+}
+
+// handlePatternAction вызывается из PTY-callback. НЕ выполняет блокирующих операций —
+// только записывает желаемое действие в pendingRecoveryAction, которое подберёт mainLoop
+// (через waitForModel периодически проверяет это поле).
+function handlePatternAction(hit) {
+    let action = null;
+    try {
+        switch (hit.action) {
+            case 'sleep_until_reset': {
+                const until = parseResetTime(hit.match);
+                action = { kind: 'sleep_until', untilMs: until.getTime() + 30000, label: `API limit reset at ${until.toLocaleTimeString()}` };
+                break;
+            }
+            case 'sleep_short_then_retry':
+                action = { kind: 'sleep_until', untilMs: Date.now() + 5 * 60 * 1000, label: 'API limit cooldown 5m' };
+                break;
+            case 'backoff':
+                action = { kind: 'sleep_until', untilMs: Date.now() + 5 * 60 * 1000, label: 'rate limit backoff 5m' };
+                break;
+            case 'backoff_short':
+                action = { kind: 'sleep_until', untilMs: Date.now() + 30 * 1000, label: 'network/server cooldown 30s' };
+                break;
+            case 'stop_manual':
+                action = { kind: 'stop_manual', label: 'требуется ручной /login' };
+                break;
+            case 'inject_compact':
+                action = { kind: 'inject_command', text: '/compact\r', label: 'context overflow → /compact' };
+                break;
+        }
+    } catch (e) { console.error('[error] handle_pattern_action:', e.message); }
+    if (action) {
+        // Сохраняем как pending — НЕ перезаписываем если уже есть и более старая (sleep_until больше pending'а)
+        if (!pendingRecoveryAction || (action.kind === 'sleep_until' && pendingRecoveryAction.untilMs && action.untilMs > pendingRecoveryAction.untilMs)) {
+            pendingRecoveryAction = action;
+            saveRetryState({ ...action, started_at: new Date().toISOString() });
+            updateStatus({ phase: 'waiting_for_recovery', recovery_label: action.label });
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// ─── /RESILIENCE LAYER ──────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════
 
 // Проверяем: не запущен ли уже другой overseer на этом проекте
 if (fs.existsSync(statusFile)) {
@@ -199,12 +690,28 @@ if (fs.existsSync(statusFile)) {
 // Очищаем .ralph-stop если остался от прошлого раза
 if (fs.existsSync(stopFile)) { try { fs.unlinkSync(stopFile); } catch (e) { console.error('[error] cleanup_stop_file:', e.message); } }
 
+// Acquire single-instance lock (вторая защита, плюс к проверке status.pid выше)
+acquireLock();
+
+// Импортируем task_state.json из tasks.md/spec.md (создаст файл при первом запуске,
+// синхронизирует если пользователь правил руками между запусками overseer)
+try { importTaskStateFromMd(); } catch (e) { console.error('[error] import_task_state:', e.message); }
+
 // Записываем статус: запущен
 writeStatus(true);
+
+// Grace period 10 секунд — даём пользователю успеть сохранить ручные правки tasks.md
+// перед включением enforcer'а (иначе он откатит несохранённые изменения).
+setTimeout(() => {
+    try { importTaskStateFromMd(); } catch {} // ещё раз — подхватываем правки за окном
+    startEnforcer();
+}, 10000);
 
 // Гарантируем очистку статуса при любом выходе + диагностика
 process.on('exit', (code) => {
     try { fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [PROCESS] exit event, code=${code}\n`, 'utf8'); } catch(e) {}
+    try { stopEnforcer(); } catch {}
+    try { releaseLock(); } catch {}
     clearStatus();
 });
 process.on('SIGINT', () => {
@@ -217,6 +724,19 @@ process.on('SIGTERM', () => {
 });
 process.on('uncaughtException', (err) => {
     try { fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [PROCESS] uncaughtException: ${err.stack}\n`, 'utf8'); } catch(e) {}
+    // Recoverable error классы — НЕ kill overseer (Claude Code PTY останется orphan, мы потеряем спринт).
+    // Это про fs.watch EPERM (Windows atomic write race), фриз filesystem ENOSPC, и т.п.
+    const recoverable = err && (
+        err.code === 'EPERM' ||
+        err.code === 'EBUSY' ||
+        err.code === 'ENOENT' ||
+        /\bwatch\b/.test(err.message || '') ||
+        /\bwatcher\b/.test(err.message || '')
+    );
+    if (recoverable) {
+        try { fs.appendFileSync(crashLog, `[${new Date().toISOString()}] [PROCESS] uncaughtException RECOVERED, continuing\n`, 'utf8'); } catch {}
+        return; // НЕ делаем clearStatus и НЕ exit — продолжаем работу
+    }
     clearStatus();
     process.exit(1);
 });
@@ -235,6 +755,11 @@ let lastThinkingTime = 0;
 let bootStepsDone = new Set(); // Выполненные шаги boot sequence
 let lastQuestionNudgeTime = 0; // Время последнего авто-ответа на вопрос
 let currentLivePauseInterval = null; // Интервал live-паузы (для очистки в killAgent)
+let patternBuffer = ''; // Sliding window 4KB для Pattern Detector
+let pendingRecoveryAction = null; // Поставленный pattern detector'ом запрос на adaptive sleep
+let lastSuccessfulReady = Date.now(); // Время последнего успешного RALPH_READY (для retry budget 24ч)
+let consecutivePtyFails = 0; // Подряд PTY-spawn'ов с code=1 без RALPH_READY (circuit breaker)
+let ptyDeadFlag = false; // Установлен onExit'ом — mainLoop увидит и сделает auto-restart
 
 // ─── DUAL-CHANNEL: JSONL ─────────────────────────────────────
 // PTY = управление (команды, boot, thinking-статус)
@@ -380,6 +905,10 @@ function superStrip(str) {
     // КРИТИЧНО: НЕ включать < и > в терминаторы ANSI — они уничтожают XML-теги протокола!
     // Убраны >< из финального символьного класса, чтобы сохранить <promise>, <result> и т.д.
     return String(str)
+        // Cursor forward (\x1b[NC) -> N пробелов. Claude Code v2.1.119 рисует UI-бар через
+        // cursor positioning, а не обычные пробелы; без этой замены слова слипаются
+        // ("bypasspermissionson") и ready-паттерны не совпадают -> bootAndInit виснет на 120с.
+        .replace(/[\u001b\u009b]\[(\d*)C/g, (_, n) => ' '.repeat(parseInt(n) || 1))
         .replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=]/g, '')
         .replace(/\]0;.*?\u0007/g, '')
         .replace(/^\s*\d+\s+/gm, '')
@@ -871,12 +1400,12 @@ try {
             if (shouldPause && !livePaused) {
                 livePaused = true;
                 ptyProcess.pause();
-                writeStatus(true, { paused: true });
+                updateStatus({ paused: true });
                 chatLog('⏸️ Пауза (процесс заморожен)', 'OVERSEER');
             } else if (!shouldPause && livePaused) {
                 livePaused = false;
                 ptyProcess.resume();
-                writeStatus(true, { paused: false });
+                updateStatus({ paused: false });
                 chatLog('▶️ Продолжение (процесс разморожен)', 'OVERSEER');
             }
         }, 1000);
@@ -893,6 +1422,20 @@ try {
             }
             const clean = superStrip(data);
             const lower = clean.toLowerCase();
+
+            // Pattern Detector — реагируем на API limit / network / auth / context overflow.
+            // Используем sliding window 4KB чтобы не ре-матчить старые сообщения и не перегружать regex.
+            patternBuffer += clean;
+            if (patternBuffer.length > 4096) patternBuffer = patternBuffer.slice(-4096);
+            try {
+                const hit = detectPattern(patternBuffer);
+                if (hit) {
+                    chatLog(`🎯 Pattern detected: ${hit.name} → action=${hit.action}`, 'OVERSEER');
+                    enforcerLogAppend(`pattern ${hit.name} action=${hit.action}`);
+                    handlePatternAction(hit);
+                    patternBuffer = ''; // сбрасываем чтобы не сматчить тот же текст ещё раз
+                }
+            } catch (e) { console.error('[error] pattern_detect:', e.message); }
 
             // Boot sequence: автоматическое прохождение диалогов загрузки
             if (agent.bootSequence) {
@@ -952,7 +1495,10 @@ try {
             if (thisPtyPid) {
                 try { require('child_process').execSync(`taskkill /f /t /pid ${thisPtyPid}`, { stdio: 'ignore', timeout: 5000 }); } catch (e) { console.error('[error] kill_orphan_children:', e.message); }
             }
-            stopRequested = true;
+            // Раньше: stopRequested=true и overseer выходит. Теперь: НЕ выходим — даём mainLoop'у
+            // и waitForModel'у узнать через ptyDeadFlag и сделать auto-restart с resume.
+            ptyDeadFlag = true;
+            ptyProcess = null;
             stopJsonlWatcher();
         });
 
@@ -988,8 +1534,44 @@ try {
             chatLog("✅ Сессия возобновлена (resume), пропускаем инициализацию.", "OVERSEER");
             await delay(3000);
             logicalBuffer = '';
-            // Nudge: напомнить Claude продолжать работу
-            sendNudge(ptyProcess, 'Ты был прерван. Продолжай выполнение текущего спринта. Если уже всё завершил — выведи RALPH_SPRINT_DONE на отдельной строке.');
+
+            // Phase-aware nudge: читаем, в какой фазе спринта Claude был прерван,
+            // и даём инструкцию соответствующую именно этой фазе.
+            let phase = 'executing';
+            let sprintNum = null;
+            let sprintTitle = null;
+            try {
+                if (fs.existsSync(statusFile)) {
+                    const st = JSON.parse(fs.readFileSync(statusFile, 'utf8'));
+                    if (st.phase) phase = st.phase;
+                    if (st.sprint) sprintNum = st.sprint;
+                    if (st.sprintTitle) sprintTitle = st.sprintTitle;
+                }
+            } catch (e) { console.error('[error] read_status_for_resume:', e.message); }
+
+            const sprintInfo = sprintNum
+                ? `спринта ${sprintNum}${sprintTitle ? ` "${sprintTitle}"` : ''}`
+                : 'текущего спринта';
+            let nudgeText;
+            switch (phase) {
+                case 'auditing':
+                    nudgeText = `Ты был прерван во время аудита ${sprintInfo}. Если ты ещё не вызывал /ralph-auditor — вызови его сейчас через Skill tool. Если уже выводил отчёт — завершай аудит. ОБЯЗАТЕЛЬНО последним сообщением выведи РОВНО ОДНО слово на отдельной строке: RALPH_AUDIT_OK или RALPH_AUDIT_FIX. Ничего другого не пиши после маркера.`;
+                    break;
+                case 'collecting_reports':
+                    nudgeText = `Ты был прерван на этапе сбора отчётов по задачам ${sprintInfo}. Overseer сейчас переспросит у тебя отчёты по каждой задаче — отвечай СТРОГО в формате блока:\n\nRALPH_RESULT\nTASK: <id>\nBRIEF: ...\nSUMMARY: ...\nSTATUS: DONE\nRALPH_END\n\nНичего другого не делай — ни писать код, ни вызывать скиллы. Жди вопросы и отвечай в указанном формате.`;
+                    break;
+                case 'committing':
+                    nudgeText = `Ты был прерван в момент, когда overseer собирался сделать git commit после закрытия ${sprintInfo}. Ничего не пиши и не делай — overseer сам довершит commit и перейдёт к следующему спринту.`;
+                    break;
+                case 'executing':
+                default:
+                    nudgeText = `Ты был прерван во время выполнения задач ${sprintInfo}. Прочитай current_sprint.md (и соответствующий spec.md), определи какие задачи уже выполнены (по наличию файлов в репо и коммитов) и продолжай с того места. НЕ ставь [x] в tasks.md — это сделает overseer. Когда закончишь все задачи спринта — выведи на отдельной строке: RALPH_SPRINT_DONE`;
+            }
+            chatLog(`🔁 Resume: фаза "${phase}"${sprintNum ? `, спринт ${sprintNum}` : ''}`, 'OVERSEER');
+            sendNudge(ptyProcess, nudgeText);
+            // Resume считается успешным = Claude Code запустился. Сбрасываем retry budget.
+            lastSuccessfulReady = Date.now();
+            consecutivePtyFails = 0;
             return true;
         }
 
@@ -1017,6 +1599,9 @@ try {
         chatLog("✅ Контекст проекта загружен.", "OVERSEER");
         await delay(2000);
         logicalBuffer = '';
+        // Сброс счётчиков retry budget — Claude Code успешно стартовал
+        lastSuccessfulReady = Date.now();
+        consecutivePtyFails = 0;
         return true;
     }
 
@@ -1044,6 +1629,49 @@ try {
             const now = Date.now();
             if (now - start > timeoutSec * 1000) { chatLog(`⏰ waitForModel: таймаут (${timeoutSec}s)`, 'OVERSEER'); return null; }
             if (fs.existsSync(stopFile)) { chatLog('🛑 waitForModel: обнаружен .ralph-stop', 'OVERSEER'); stopRequested = true; return null; }
+
+            // ─── PTY мёртв (crash, kill, лимит API при старте) — auto-restart с resume ───
+            if (ptyDeadFlag) {
+                ptyDeadFlag = false;
+                chatLog('💀 PTY мёртв — пробую auto-restart с resume.', 'OVERSEER');
+                return 'PTY_DEAD';
+            }
+
+            // ─── Pattern Detector pending action — обрабатываем СНАЧАЛА ───
+            if (pendingRecoveryAction) {
+                const act = pendingRecoveryAction;
+                pendingRecoveryAction = null; // claim — иначе зациклимся
+                try {
+                    if (act.kind === 'sleep_until') {
+                        chatLog(`💤 Adaptive sleep до ${new Date(act.untilMs).toLocaleTimeString()}: ${act.label}`, 'OVERSEER');
+                        const reason = await sleepInterruptible(act.untilMs, act.label);
+                        chatLog(`⏰ Sleep завершился: ${reason}`, 'OVERSEER');
+                        clearRetryState();
+                        if (reason === 'stop') { stopRequested = true; return null; }
+                        // После сна возвращаем 'PATTERN_RECOVERY' — caller'у понятно что нужен resume
+                        return 'PATTERN_RECOVERY';
+                    } else if (act.kind === 'inject_command') {
+                        if (ptyProcess) { try { ptyProcess.write(act.text); } catch {} }
+                        chatLog(`💉 Injected: ${act.label}`, 'OVERSEER');
+                        clearRetryState();
+                        await delay(5000);
+                        // продолжаем цикл — Claude обработает /compact и продолжит
+                    } else if (act.kind === 'stop_manual') {
+                        chatLog(`🛑 ${act.label} — overseer переходит в dormant. Проверьте Claude Code.`, 'OVERSEER');
+                        updateStatus({ phase: 'dormant', dormant_reason: act.label });
+                        return 'DORMANT';
+                    }
+                } catch (e) { console.error('[error] handle_pending_recovery:', e.message); }
+            }
+
+            // Pause-aware: пока существует .ralph-pause, PTY процесс заморожен livePauseInterval'ом,
+            // Claude НЕ может писать в JSONL — это нормально, не считаем silence. Обнуляем lastDataTime
+            // чтобы FORMAT_ERROR_SILENCE_SEC не сработал и не спровоцировал ложный restart.
+            if (fs.existsSync(pauseFile)) {
+                lastDataTime = now;
+                await delay(2000);
+                continue;
+            }
 
             // Отслеживаем активность (JSONL рост + PTY thinking)
             if (jsonlBuffer.length !== lastJsonlLen) {
@@ -1449,8 +2077,13 @@ RALPH_AUDIT_FIX
         if (firstSprint) {
             resumeSid = getSprintSessionId(firstSprint.sprintNum);
             if (resumeSid) {
-                // Проверяем что JSONL существует
-                const testJsonl = path.join(claudeProjectsDir, projectSlug(workspaceDir), `${resumeSid}.jsonl`);
+                // Проверяем что JSONL существует.
+                // КРИТИЧНО: используем workspaceDirResolved (real path без junction), потому что
+                // Claude Code v2.1.117+ резолвит junction перед вычислением slug'а. spawnAgent тоже
+                // использует workspaceDirResolved при создании jsonlPath. Если тут взять plain
+                // workspaceDir — slug будет другой → fs.existsSync всегда false → resume всегда
+                // сбрасывается, даже если JSONL на диске реально есть.
+                const testJsonl = path.join(claudeProjectsDir, projectSlug(workspaceDirResolved), `${resumeSid}.jsonl`);
                 if (!fs.existsSync(testJsonl)) {
                     chatLog(`⚠️ JSONL для сессии ${resumeSid} не найден. Начинаю новую сессию.`, 'OVERSEER');
                     resumeSid = null;
@@ -1470,12 +2103,12 @@ RALPH_AUDIT_FIX
             // ─── ПАУЗА: ждём удаления .ralph-pause ───
             while (fs.existsSync(pauseFile) && !stopRequested) {
                 chatLog('⏸️ Пауза...', 'OVERSEER');
-                writeStatus(true, { paused: true });
+                updateStatus({ paused: true });
                 await delay(2000);
                 if (fs.existsSync(stopFile)) { stopRequested = true; break; }
             }
             if (stopRequested) break;
-            writeStatus(true, { paused: false });
+            updateStatus({ paused: false });
 
             // ─── НАЙТИ СЛЕДУЮЩИЙ СПРИНТ ───
             const sprint = findNextSprint();
@@ -1544,7 +2177,7 @@ RALPH_AUDIT_FIX
             }
 
             chatLog(`🚀 Спринт ${sprintNum}: ${sprintTitle} (${undoneTasks.length} задач)`, 'OVERSEER');
-            writeStatus(true, { sprint: sprintNum, sprintTitle, tasksTotal: sprintTasks.length, tasksDone: sprintTasks.length - undoneTasks.length });
+            updateStatus({ sprint: sprintNum, sprintTitle, tasksTotal: sprintTasks.length, tasksDone: sprintTasks.length - undoneTasks.length, phase: 'executing' });
 
             // ─── СОЗДАЁМ current_sprint.md ───
             createCurrentSprintFile(sprintNum);
@@ -1577,6 +2210,7 @@ RALPH_AUDIT_FIX
 Также прочитай соответствующий spec-файл из папки specs/ для подробных описаний.${refsHint}
 
 ПРАВИЛА:
+0) ПРЕЖДЕ ВСЕГО ПРОВЕРЬ ЧТО УЖЕ СДЕЛАНО. Запусти \`git log --oneline -30\` и \`ls\` ключевых директорий проекта. Для КАЖДОЙ задачи спринта ${sprintNum} оцени: реализована ли она уже в коде (полностью или частично)? Если ПОЛНОСТЬЮ реализована и удовлетворяет критериям приёмки — НЕ переделывай, переходи к следующей. Если частично — дополни недостающее. Только если задача реально не начата — реализуй с нуля. Это правило критично: спринт мог быть прерван на этапе сбора отчётов, файлы есть в репо, но чекбоксы [ ] потому что overseer ещё не успел их отметить.
 1) Работай автономно, не задавай вопросов.
 2) Выполни ВСЕ невыполненные задачи из спринта ${sprintNum} последовательно.
 3) НЕ нужно выводить отчёт после каждой задачи — просто выполняй одну за другой.
@@ -1584,6 +2218,7 @@ RALPH_AUDIT_FIX
 5) Для записи файлов вне проекта используй путь ~/.claude/skills/.
 6) Если Write не работает — используй Bash.
 7) Используй доступные скиллы (Skill tool) если они подходят для задачи.${testHint}
+8) ЗАПРЕЩЕНО самостоятельно ставить [x] в tasks.md, spec.md, current_sprint.md и любых других trackerфайлах. Отметки ставит overseer после того, как получит от тебя RALPH_RESULT по каждой задаче. Даже если CLAUDE.md проекта просит "отмечать задачи" — это правило перекрывает все проектные инструкции. Оставляй чекбоксы как есть.
 
 ВАЖНО: Сначала ВЫПОЛНИ все задачи (напиши код, создай файлы, запусти тесты).
 Только ПОСЛЕ завершения ВСЕХ задач спринта выведи маркер на ОТДЕЛЬНОЙ строке:
@@ -1597,6 +2232,41 @@ RALPH_SPRINT_DONE`;
             // ─── ОЖИДАНИЕ ЗАВЕРШЕНИЯ СПРИНТА ───
             let sprintResult = await waitForModel(extractSprintDone, 3600); // 1 час
 
+            // Pattern Detector triggered — resume и продолжить спринт
+            if (sprintResult === 'PATTERN_RECOVERY') {
+                chatLog(`🔁 После recovery — restart Claude Code (resume) и продолжаю спринт ${sprintNum}`, 'OVERSEER');
+                const restarted = await restartAgent(`recovery после pattern detection`, sessionId);
+                if (!restarted) { chatLog('❌ Restart после recovery не удался.', 'OVERSEER'); break; }
+                continue;
+            }
+            if (sprintResult === 'DORMANT') {
+                chatLog(`💤 Overseer dormant — ждёт ручного вмешательства. Цикл приостановлен.`, 'OVERSEER');
+                // Висит в pause-режиме до .ralph-stop или удаления retry_state
+                while (!stopRequested && !fs.existsSync(stopFile)) await delay(10000);
+                break;
+            }
+            if (sprintResult === 'PTY_DEAD') {
+                consecutivePtyFails++;
+                // Retry budget: если за последние 24 часа не было ни одного RALPH_READY → dormant
+                const hoursSinceLastReady = (Date.now() - lastSuccessfulReady) / 3600000;
+                if (hoursSinceLastReady >= 24) {
+                    chatLog(`💤 Claude Code недоступен ${hoursSinceLastReady.toFixed(1)}ч (>24ч). Dormant. Проверьте подписку/сеть.`, 'OVERSEER');
+                    updateStatus({ phase: 'dormant', dormant_reason: 'Claude Code unavailable >24h' });
+                    while (!stopRequested && !fs.existsSync(stopFile)) await delay(10000);
+                    break;
+                }
+                // Exponential backoff если подряд несколько fail'ов
+                const backoffSec = Math.min(3600, 60 * Math.pow(2, consecutivePtyFails - 1));
+                if (consecutivePtyFails > 1) {
+                    chatLog(`⏳ PTY fail #${consecutivePtyFails} — sleep ${backoffSec}s перед restart`, 'OVERSEER');
+                    const reason = await sleepInterruptible(Date.now() + backoffSec * 1000, `PTY backoff (fail #${consecutivePtyFails})`);
+                    if (reason === 'stop') { stopRequested = true; break; }
+                }
+                const restarted = await restartAgent(`PTY died, auto-restart #${consecutivePtyFails}`, sessionId || null);
+                if (!restarted) { chatLog(`⚠️ Auto-restart не удался — попробую снова в следующем цикле.`, 'OVERSEER'); continue; }
+                continue;
+            }
+
             // Retry если нет маркера
             let retries = 0;
             while (!sprintResult && retries < 3 && !stopRequested) {
@@ -1605,6 +2275,11 @@ RALPH_SPRINT_DONE`;
                 if (secSinceThinking < 120) {
                     chatLog(`⏳ Спринт ${sprintNum}: Claude ещё активен. Ждём...`, 'OVERSEER');
                     sprintResult = await waitForModel(extractSprintDone, 600);
+                    if (sprintResult === 'PATTERN_RECOVERY') {
+                        const r = await restartAgent(`recovery (retry loop)`, sessionId);
+                        if (!r) break;
+                        sprintResult = null; continue;
+                    }
                     continue;
                 }
                 chatLog(`⚠️ Спринт ${sprintNum}: нет маркера. Напоминание (${retries}/3)...`, 'OVERSEER');
@@ -1632,22 +2307,49 @@ RALPH_SPRINT_DONE`;
                 continue; // Вернёмся в цикл — findNextSprint вернёт тот же спринт
             }
 
-            // ─── СПРИНТ ЗАВЕРШЁН ───
-            chatLog(`✅ Спринт ${sprintNum}: все задачи выполнены!`, 'OVERSEER');
-
-            // Отмечаем все невыполненные задачи как [x]
-            for (const t of undoneTasks) {
-                markTaskDone(t);
-            }
-            chatLog(`✅ Отмечено ${undoneTasks.length} задач как выполненные`, 'OVERSEER');
+            // ─── СПРИНТ ЗАВЕРШЁН (Claude вывел RALPH_SPRINT_DONE) ───
+            chatLog(`✅ Спринт ${sprintNum}: Claude отчитался о завершении. Перехожу к аудиту/сбору отчётов.`, 'OVERSEER');
+            // ВАЖНО: задачи НЕ помечаются [x] здесь. Это делает markTaskCollected() ПОСЛЕ
+            // получения RALPH_RESULT и сохранения results/<id>.json. Гарантирует что
+            // ложно-зелёный спринт (помеченный без отчётов) невозможен — даже если batch-сбор
+            // упадёт по таймауту, задачи останутся [ ] и при resume Claude вернётся доделать.
 
             // ─── АУДИТ ───
             const attempts = sprintAuditAttempts[sprintNum] || 0;
             if (attempts < MAX_AUDIT_ATTEMPTS) {
                 sprintAuditAttempts[sprintNum] = attempts + 1;
                 chatLog(`📋 Аудит спринта ${sprintNum} (попытка ${attempts + 1}/${MAX_AUDIT_ATTEMPTS})...`, 'OVERSEER');
+                updateStatus({ phase: 'auditing' });
                 const auditResult = await auditSprint(sprintNum, attempts + 1);
                 if (auditResult === 'FIX') {
+                    // Аудитор добавил задачи в tasks.md — но spec.md файлы остались старые,
+                    // task_state.json тоже stale. Регенерируем spec для текущего спринта и
+                    // обновляем task_state, чтобы следующая итерация увидела новые задачи.
+                    try {
+                        const sprintPrefix = sprintNum.toString().padStart(3, '0');
+                        const dirs = fs.readdirSync(specsDir).filter(d => d.startsWith(sprintPrefix + '-'));
+                        for (const d of dirs) {
+                            const fullPath = path.join(specsDir, d);
+                            try { fs.rmSync(fullPath, { recursive: true, force: true, maxRetries: 3 }); chatLog(`🗑️ Удалён старый spec: ${d}`, 'OVERSEER'); }
+                            catch (e) { chatLog(`⚠️ Не удалось удалить ${d}: ${e.message}`, 'OVERSEER'); }
+                        }
+                        const converterPath = path.join(__dirname, 'spec-converter-fixed.ps1');
+                        if (fs.existsSync(converterPath)) {
+                            chatLog(`🔧 Перегенерирую spec.md для спринта ${sprintNum}...`, 'OVERSEER');
+                            require('child_process').execSync(
+                                `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "${converterPath}"`,
+                                { cwd: projectDir, timeout: 60000, stdio: 'pipe' }
+                            );
+                            chatLog(`✅ spec.md спринта ${sprintNum} перегенерирован`, 'OVERSEER');
+                        } else {
+                            chatLog(`⚠️ spec-converter не найден: ${converterPath}`, 'OVERSEER');
+                        }
+                        // Перечитываем task_state из обновлённого tasks.md
+                        importTaskStateFromMd();
+                        chatLog(`🔄 task_state.json обновлён из tasks.md`, 'OVERSEER');
+                    } catch (e) {
+                        chatLog(`⚠️ Авто-регенерация spec/task_state не удалась: ${e.message?.slice(0, 100)}`, 'OVERSEER');
+                    }
                     // Проверяем что аудитор действительно добавил задачи
                     const postAuditSprint = findNextSprint();
                     if (postAuditSprint && postAuditSprint.sprintNum === sprintNum && postAuditSprint.undoneTasks.length > 0) {
@@ -1669,6 +2371,7 @@ RALPH_SPRINT_DONE`;
 
             if (tasksNeedingReport.length > 0) {
                 chatLog(`📝 Сбор отчётов: ${tasksNeedingReport.length} задач спринта ${sprintNum} (batch)...`, 'OVERSEER');
+                updateStatus({ phase: 'collecting_reports' });
 
                 // Формируем один промпт для всех задач
                 const taskExamples = tasksNeedingReport.map(t =>
@@ -1714,6 +2417,9 @@ RALPH_SPRINT_DONE`;
                             summary: r.summary || 'Задача выполнена.'
                         }, null, 2), 'utf8');
 
+                        // Только теперь — ставим [x] в tasks.md/spec.md (через canonical task_state).
+                        try { markTaskCollected(taskId, sessionId); } catch (e) { console.error('[error] mark_collected:', e.message); }
+
                         let briefLine = r.brief || r.summary?.split(/\.\s/)[0] || `Task ${taskId}`;
                         if (briefLine.length > 150) briefLine = briefLine.slice(0, 147) + '...';
                         fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${taskId}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${r.summary}\n\n</details>\n\n---\n\n`, 'utf8');
@@ -1738,6 +2444,7 @@ RALPH_SPRINT_DONE`;
                                 brief: fallbackResult.brief || '',
                                 summary: fallbackResult.summary || 'Задача выполнена.'
                             }, null, 2), 'utf8');
+                            try { markTaskCollected(fallbackResult.task_id || t.id, sessionId); } catch (e) { console.error('[error] mark_collected_fallback:', e.message); }
                             let briefLine = fallbackResult.brief || `Task ${t.id}`;
                             if (briefLine.length > 150) briefLine = briefLine.slice(0, 147) + '...';
                             fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${t.id}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${fallbackResult.summary}\n\n</details>\n\n---\n\n`, 'utf8');
@@ -1747,14 +2454,30 @@ RALPH_SPRINT_DONE`;
                         }
                     }
                 } else {
-                    chatLog(`⚠️ Batch-сбор отчётов не удался. Пропускаю.`, 'OVERSEER');
+                    chatLog(`⚠️ Batch-сбор отчётов не удался. НЕ закрываю спринт — оставляю для resume.`, 'OVERSEER');
                 }
             } else {
                 chatLog(`✅ Все отчёты спринта ${sprintNum} уже собраны`, 'OVERSEER');
             }
 
+            // ─── ПРОВЕРКА: все ли отчёты собраны? ───
+            // Если есть задачи без results/<id>.json — спринт не закрываем, не коммитим, не рестартуем.
+            // Continue → mainLoop вернётся, findNextSprint опять найдёт этот же спринт (т.к.
+            // markTaskCollected не вызван для задач без отчёта → они остались [ ]) → resume сессии.
+            const finalUncollected = getSprintTasks(sprintNum).filter(t => {
+                const safeId = t.id.replace(/\./g, '_');
+                return !fs.existsSync(path.join(resultsDir, `${safeId}.json`));
+            });
+            if (finalUncollected.length > 0) {
+                chatLog(`⏸️ Спринт ${sprintNum}: ${finalUncollected.length} задач без отчётов (${finalUncollected.map(t => t.id).join(', ')}). Не закрываю — следующий цикл попробует resume.`, 'OVERSEER');
+                // Не делаем commit, не вызываем clearSprintSession — sprint_sessions.json
+                // сохранит привязку, и следующий проход mainLoop сделает resume для дозбора отчётов.
+                continue;
+            }
+
             // ─── КОММИТ ───
             chatLog(`📦 Спринт ${sprintNum} закрыт. Коммитим...`, 'OVERSEER');
+            updateStatus({ phase: 'committing' });
             try {
                 const { execSync } = require('child_process');
                 execSync('git add -A', { cwd: projectDir, timeout: 60000 });
