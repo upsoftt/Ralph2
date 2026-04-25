@@ -14,6 +14,34 @@ const { getAgent } = require('./agents');
 const projectDir = process.argv[2];
 if (!projectDir) { process.exit(1); }
 
+// Singleton-check: запрещаем второй overseer на том же projectDir.
+// Защита от UI-кнопки /api/start пока первый ещё жив, и от accidentальных
+// двойных стартов. За день видели 6 параллельных зомби — Windows ConPTY
+// засорялся, новый CC не мог spawn'ить (DLL init failure).
+try {
+    const myPid = process.pid;
+    const out = require('child_process').execSync(
+        `wmic process where "name='node.exe'" get ProcessId,CommandLine /format:csv 2>nul`,
+        { encoding: 'utf8', timeout: 5000 }
+    );
+    const conflicts = out.split('\n').filter(line => {
+        if (!line.trim() || line.startsWith('Node,')) return false;
+        const parts = line.split(',');
+        const cmd = parts.slice(1, -1).join(',').toLowerCase();
+        const pid = parseInt(parts[parts.length - 1]);
+        if (!cmd || isNaN(pid) || pid === myPid) return false;
+        return cmd.includes('ralph-overseer') && cmd.includes(projectDir.toLowerCase().replace(/\\/g, '\\\\'));
+    });
+    if (conflicts.length > 0) {
+        const pids = conflicts.map(c => c.split(',').pop()).join(', ');
+        console.error(`[FATAL] Уже запущен overseer на projectDir=${projectDir} (PID ${pids}). Останови его прежде чем запускать новый, или дождись его graceful shutdown через .ralph-stop.`);
+        process.exit(2);
+    }
+} catch (e) {
+    // wmic недоступен / другая ошибка — НЕ блокируем старт (могут быть legitimate сценарии)
+    if (e.status !== 2) console.error('[warn] singleton-check skipped:', e.message);
+}
+
 const agentName = process.argv[3] || process.env.RALPH_AGENT || 'claude';
 const agent = getAgent(agentName);
 
@@ -881,6 +909,19 @@ function startJsonlWatcher() {
     jsonlWatchInterval = setInterval(() => {
         const texts = readNewJsonlMessages();
         for (const text of texts) {
+            // Pattern detection ТАКЖЕ для JSONL output — CC v2.1.119+ часто пишет
+            // критические сообщения (rate limit, "Prompt is too long") через assistant
+            // messages в JSONL, минуя PTY data events. Без этого pattern detector
+            // их пропускает → recovery actions не активируются → overseer повисает.
+            try {
+                const cleanForDetect = stripPromptFrames(text);
+                const hit = detectPattern(cleanForDetect);
+                if (hit) {
+                    chatLog(`🎯 Pattern detected (JSONL): ${hit.name} → action=${hit.action}`, 'OVERSEER');
+                    handlePatternAction(hit);
+                }
+            } catch (e) { console.error('[error] jsonl_pattern_detect:', e.message); }
+
             // Не дублируем tool_use строки — они уже показаны
             if (text.startsWith('●')) {
                 chatLog(text, agent.name);
@@ -1529,7 +1570,14 @@ try {
             }
             // Раньше: stopRequested=true и overseer выходит. Теперь: НЕ выходим — даём mainLoop'у
             // и waitForModel'у узнать через ptyDeadFlag и сделать auto-restart с resume.
-            ptyDeadFlag = true;
+            // Spurious-onExit фильтр: node-pty иногда выдаёт ложный onExit в первые ~5s
+            // после spawn. Реальный crash через 5+ секунд — устанавливаем флаг как обычно.
+            const ageMs = Date.now() - spawnTime;
+            if (ageMs < 5000) {
+                chatLog(`⚠️ Spurious onExit через ${ageMs}ms после spawn — игнорирую (вероятно ConPTY init dance)`, 'OVERSEER');
+            } else {
+                ptyDeadFlag = true;
+            }
             ptyProcess = null;
             // Edge case: если PTY умер между BEGIN и END рамки — patternBuffer содержит
             // незакрытый промпт, lazy regex его не вырежет → текст инструкции попадёт в detectPattern.
@@ -1881,7 +1929,9 @@ try {
         if (!fs.existsSync(tasksFile)) return `Sprint ${sprintNum}`;
         try {
             const content = fs.readFileSync(tasksFile, 'utf8');
-            const match = content.match(new RegExp(`##\\s*(?:Sprint|Спринт)\\s*${sprintNum}[:\\s]+(.+)`, 'i'));
+            // [^\n]+ ограничивает захват ОДНОЙ строкой markdown header,
+            // ^ и m-flag — header должен быть в начале строки (не цитата в TASK).
+            const match = content.match(new RegExp(`^##\\s*(?:Sprint|Спринт)\\s*${sprintNum}[:\\s]+([^\\n]+)`, 'mi'));
             return match ? match[1].trim() : `Sprint ${sprintNum}`;
         } catch (e) { return `Sprint ${sprintNum}`; }
     }
