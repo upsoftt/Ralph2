@@ -2445,6 +2445,12 @@ RALPH_SPRINT_DONE`;
             // ложно-зелёный спринт (помеченный без отчётов) невозможен — даже если batch-сбор
             // упадёт по таймауту, задачи останутся [ ] и при resume Claude вернётся доделать.
 
+            // ─── EARLY STOP CHECK ───
+            // Если .ralph-stop появился пока мы были в waitForModel (RALPH_SPRINT_DONE),
+            // НЕ запускаем дорогой аудит / batch-collect — выходим сразу. Иначе тратим
+            // токены на промпты которые Claude всё равно не обработает.
+            if (stopRequested || fs.existsSync(stopFile)) { stopRequested = true; break; }
+
             // ─── АУДИТ ───
             const attempts = sprintAuditAttempts[sprintNum] || 0;
             if (attempts < MAX_AUDIT_ATTEMPTS) {
@@ -2501,6 +2507,9 @@ RALPH_SPRINT_DONE`;
             });
 
             if (tasksNeedingReport.length > 0) {
+                // EARLY STOP — не отправляем длинный batch-промпт если уже остановили
+                if (stopRequested || fs.existsSync(stopFile)) { stopRequested = true; break; }
+
                 chatLog(`📝 Сбор отчётов: ${tasksNeedingReport.length} задач спринта ${sprintNum} (batch)...`, 'OVERSEER');
                 updateStatus({ phase: 'collecting_reports' });
 
