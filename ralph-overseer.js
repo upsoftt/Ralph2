@@ -2016,7 +2016,7 @@ RALPH_AUDIT_FIX
 
     // Трекинг аудитов: спринт → количество попыток
     const sprintAuditAttempts = {};
-    const MAX_AUDIT_ATTEMPTS = 3; // Максимум 3 цикла аудита на спринт
+    const MAX_AUDIT_ATTEMPTS = 5; // Максимум 5 циклов аудита на спринт
 
     function findNextTask() {
         const walk = (dir) => {
