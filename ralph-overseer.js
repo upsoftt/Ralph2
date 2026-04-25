@@ -608,7 +608,24 @@ const PATTERN_TABLE = [
 
 let _lastPatternMatch = { name: null, ts: 0 }; // дедупликация повторных matches
 
+// ─── PROMPT FRAMES ───────────────────────────────────────────────────────
+// Каждый промпт overseer'а оборачивается в эти маркеры. Все consumers
+// (detectPattern, extract*, frontend) перед matching/grepping вырезают
+// содержимое между маркерами через stripPromptFrames(). Это защищает от
+// false-positive когда инструкция в промпте содержит триггер-фразу
+// (RALPH_SPRINT_DONE, RALPH_AUDIT_OK, "rate limit" и т.п.).
+const PROMPT_BEGIN = '<<<RALPH_PROMPT_BEGIN>>>';
+const PROMPT_END = '<<<RALPH_PROMPT_END>>>';
+const PROMPT_FRAME_RE = /<<<RALPH_PROMPT_BEGIN>>>[\s\S]*?<<<RALPH_PROMPT_END>>>/g;
+
+function stripPromptFrames(text) {
+    return (text || '').replace(PROMPT_FRAME_RE, '');
+}
+
 function detectPattern(textChunk) {
+    // Защита от matching внутри инструкций overseer'а: вырезаем содержимое рамок
+    // ДО matching. Если строка не содержит маркеров — replace no-op, накладных нет.
+    textChunk = stripPromptFrames(textChunk);
     for (const p of PATTERN_TABLE) {
         const m = textChunk.match(p.re);
         if (m) {
@@ -1107,8 +1124,11 @@ function sendCommand(ptyProc, cmd) {
  */
 function writePromptToPty(ptyProc, cmd) {
     const text = cmd.replace(/\r?\n/g, ' ');
+    // Оборачиваем промпт в RALPH_PROMPT-рамки, чтобы pattern detector и extract*
+    // могли надёжно отличить инструкции overseer'а от output Claude Code.
+    const wrapped = `${PROMPT_BEGIN} ${text} ${PROMPT_END}`;
     try {
-        ptyProc.write('\x1b[200~' + text + '\x1b[201~');
+        ptyProc.write('\x1b[200~' + wrapped + '\x1b[201~');
     } catch (e) { console.error('[error] pty_write_paste:', e.message); return; }
     setTimeout(() => {
         try { ptyProc.write('\r'); }
@@ -1139,7 +1159,7 @@ function sendNudge(ptyProc, cmd) {
  * Возвращает массив { status, task_id, brief, summary } или пустой массив.
  */
 function extractAllResults(text) {
-    const source = jsonlBuffer || text;
+    const source = stripPromptFrames(jsonlBuffer || text);
     const cleaned = source
         .replace(/\*\*/g, '')
         .replace(/[║╔╗╚╝═╠╣╬╦╩─│┌┐└┘├┤┬┴┼▐▌▀▄█░▒▓]/g, '')
@@ -1181,7 +1201,7 @@ function extractAllResults(text) {
  */
 function extractResult(text) {
     // Используем ТОЛЬКО JSONL буфер — PTY logicalBuffer содержит эхо промптов с шаблоном RALPH_RESULT
-    const source = jsonlBuffer || text;
+    const source = stripPromptFrames(jsonlBuffer || text);
 
     // ─── Текстовый протокол RALPH_RESULT ───
     // Убираем markdown bold (**) и box-drawing символы (║╔╗╚╝═ и т.д.)
@@ -1279,7 +1299,7 @@ function extractResult(text) {
  * Проверяет готовность инициализации из JSONL буфера
  */
 function extractInitReady(text) {
-    const source = jsonlBuffer || text;
+    const source = stripPromptFrames(jsonlBuffer || text);
     if (source.includes("RALPH_READY")) return "READY";
     if (source.includes("<promise>DONE</promise>")) return "READY";
     if (/\bDONE\b/.test(source)) return "READY";
@@ -1511,6 +1531,10 @@ try {
             // и waitForModel'у узнать через ptyDeadFlag и сделать auto-restart с resume.
             ptyDeadFlag = true;
             ptyProcess = null;
+            // Edge case: если PTY умер между BEGIN и END рамки — patternBuffer содержит
+            // незакрытый промпт, lazy regex его не вырежет → текст инструкции попадёт в detectPattern.
+            // Сбрасываем буфер при смерти PTY.
+            patternBuffer = '';
             stopJsonlWatcher();
         });
 
@@ -1863,7 +1887,7 @@ try {
     }
 
     function extractAuditResult(text) {
-        const source = jsonlBuffer || text;
+        const source = stripPromptFrames(jsonlBuffer || text);
         // Строгая проверка: маркер на отдельной строке
         if (/^RALPH_AUDIT_OK\s*$/m.test(source)) return 'OK';
         if (/^RALPH_AUDIT_FIX\s*$/m.test(source)) return 'FIX';
@@ -2077,7 +2101,7 @@ RALPH_AUDIT_FIX
      * Детектор завершения спринта
      */
     function extractSprintDone(text) {
-        const source = jsonlBuffer || text;
+        const source = stripPromptFrames(jsonlBuffer || text);
         // Строгая проверка: маркер на отдельной строке (не внутри цитаты промпта)
         if (/^RALPH_SPRINT_DONE\s*$/m.test(source)) return 'DONE';
         return null;
