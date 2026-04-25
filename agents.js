@@ -51,6 +51,10 @@ const AGENTS = {
         bootSequence: [
             { wait: 'yes, i accept', send: '\x1b[B\r', delay: 500, desc: 'Accept bypass permissions' },
             { wait: 'yes, i trust this folder', send: '\r', delay: 500, desc: 'Trust project folder' },
+            // v2.1.119+: при resume больших сессий CC показывает выбор стратегии.
+            // Курсор по умолчанию на "1. Resume from summary (recommended)" — просто Enter.
+            // Экономит токены vs полный resume (296k+), контекст сохраняется через summary.
+            { wait: 'resume from summary', send: '\r', delay: 800, desc: 'Resume from summary (v2.1.119+)' },
         ],
         patterns: {
             // Индикаторы активной работы модели (lowercase)

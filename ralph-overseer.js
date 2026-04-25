@@ -538,10 +538,20 @@ function clearRetryState() {
 }
 
 // Stop-reactive sleep: ждёт до timeMs, проверяя stopFile/pauseFile/wake (clearRetryState) каждые 5с.
+// Пауза НЕ прерывает сон — она продлевает untilTimeMs на длительность паузы, чтобы backoff/reset-timer
+// не завершался раньше времени пока пользователь держит pause.
 async function sleepInterruptible(untilTimeMs, label) {
     while (Date.now() < untilTimeMs) {
         if (fs.existsSync(stopFile)) return 'stop';
-        if (fs.existsSync(pauseFile)) return 'pause';
+        if (fs.existsSync(pauseFile)) {
+            const pauseStart = Date.now();
+            try { updateStatus({ phase: 'paused_during_sleep', wait_label: label }); } catch {}
+            while (fs.existsSync(pauseFile) && !fs.existsSync(stopFile)) {
+                await new Promise(r => setTimeout(r, 2000));
+            }
+            untilTimeMs += Date.now() - pauseStart; // продлеваем deadline на длительность паузы
+            continue;
+        }
         if (!fs.existsSync(retryStateFile)) return 'wake'; // wake-up через POST /api/wake
         const remainSec = Math.max(0, Math.round((untilTimeMs - Date.now()) / 1000));
         if (remainSec % 30 === 0) {
@@ -1510,15 +1520,37 @@ try {
      * Возвращает true если инициализация прошла успешно
      */
     async function bootAndInit(isResume = false) {
-        chatLog(`⏳ Ожидание загрузки ${agent.name}...`, 'OVERSEER');
+        chatLog(`⏳ Ожидание загрузки ${agent.name}${isResume ? ' (resume — может быть медленнее)' : ''}...`, 'OVERSEER');
+        // Boot-loop с учётом паузы: пока .ralph-pause активен, PTY заморожен и паттерн
+        // не появится — тикать таймер нельзя. Пауза вычитается из elapsed.
+        // Timeout увеличен до 300s: resume большой сессии (JSONL > 1MB) может занимать 120-180s.
+        const BOOT_TIMEOUT_SEC = 300;
         let initialReady = false;
-        for (let i = 0; i < 120; i++) {
+        const bootStart = Date.now();
+        let totalPausedMs = 0;
+        let lastLogAt = bootStart;
+        while (true) {
             if (stopRequested) { chatLog('❌ PTY процесс завершился во время загрузки.', 'OVERSEER'); return false; }
+            if (fs.existsSync(pauseFile)) {
+                const pauseStart = Date.now();
+                while (fs.existsSync(pauseFile) && !stopRequested && !fs.existsSync(stopFile) && !ptyDeadFlag) {
+                    await delay(2000);
+                }
+                totalPausedMs += Date.now() - pauseStart;
+                continue;
+            }
+            const elapsedSec = Math.floor((Date.now() - bootStart - totalPausedMs) / 1000);
+            if (elapsedSec >= BOOT_TIMEOUT_SEC) break;
             const low = logicalBuffer.toLowerCase();
             if (agent.patterns.ready.some(p => low.includes(p))) { initialReady = true; break; }
+            // Progress-log каждые 30с — пользователь видит что boot идёт
+            if (Date.now() - lastLogAt >= 30000) {
+                chatLog(`⏳ Boot: ${elapsedSec}s / ${BOOT_TIMEOUT_SEC}s (ждём '${agent.patterns.ready[0]}')...`, 'OVERSEER');
+                lastLogAt = Date.now();
+            }
             await delay(1000);
         }
-        if (!initialReady) { chatLog('❌ Агент не загрузился за 120 секунд.', 'OVERSEER'); return false; }
+        if (!initialReady) { chatLog(`❌ Агент не загрузился за ${BOOT_TIMEOUT_SEC} секунд.`, 'OVERSEER'); return false; }
 
         chatLog('⏳ Boot OK, ждём 3с стабилизации...', 'OVERSEER');
         await delay(3000);
@@ -1619,6 +1651,7 @@ try {
 
     async function waitForModel(conditionFn, timeoutSec = 1800) {
         const start = Date.now();
+        let totalPausedMs = 0; // суммарное время, проведённое под .ralph-pause — вычитается из elapsed
         await delay(2000);
 
         const FORMAT_ERROR_SILENCE_SEC = 600;
@@ -1627,7 +1660,7 @@ try {
 
         while (!stopRequested) {
             const now = Date.now();
-            if (now - start > timeoutSec * 1000) { chatLog(`⏰ waitForModel: таймаут (${timeoutSec}s)`, 'OVERSEER'); return null; }
+            if (now - start - totalPausedMs > timeoutSec * 1000) { chatLog(`⏰ waitForModel: таймаут (${timeoutSec}s)`, 'OVERSEER'); return null; }
             if (fs.existsSync(stopFile)) { chatLog('🛑 waitForModel: обнаружен .ralph-stop', 'OVERSEER'); stopRequested = true; return null; }
 
             // ─── PTY мёртв (crash, kill, лимит API при старте) — auto-restart с resume ───
@@ -1664,12 +1697,18 @@ try {
                 } catch (e) { console.error('[error] handle_pending_recovery:', e.message); }
             }
 
-            // Pause-aware: пока существует .ralph-pause, PTY процесс заморожен livePauseInterval'ом,
-            // Claude НЕ может писать в JSONL — это нормально, не считаем silence. Обнуляем lastDataTime
-            // чтобы FORMAT_ERROR_SILENCE_SEC не сработал и не спровоцировал ложный restart.
+            // Pause-aware: пока .ralph-pause существует, PTY заморожен через ptyProcess.pause().
+            // Замораживаем и наш timeout: блокируемся в inner-loop до снятия паузы,
+            // затем прибавляем длительность паузы к totalPausedMs, чтобы elapsed считался
+            // только по активному времени. Иначе 3600s timeout тикает под паузой и после
+            // возобновления Overseer ложно решает, что спринт завис → resume без причины.
             if (fs.existsSync(pauseFile)) {
-                lastDataTime = now;
-                await delay(2000);
+                const pauseStart = Date.now();
+                while (fs.existsSync(pauseFile) && !stopRequested && !fs.existsSync(stopFile) && !ptyDeadFlag) {
+                    await delay(2000);
+                }
+                totalPausedMs += Date.now() - pauseStart;
+                lastDataTime = Date.now();
                 continue;
             }
 
@@ -2282,6 +2321,12 @@ RALPH_SPRINT_DONE`;
                     }
                     continue;
                 }
+                // Если pause активна — не шлём nudge (PTY заморожен, nudge уйдёт в буфер
+                // и при снятии паузы выплюнется весь разом). Ждём снятия.
+                while (fs.existsSync(pauseFile) && !stopRequested && !fs.existsSync(stopFile)) {
+                    await delay(2000);
+                }
+                if (stopRequested || fs.existsSync(stopFile)) break;
                 chatLog(`⚠️ Спринт ${sprintNum}: нет маркера. Напоминание (${retries}/3)...`, 'OVERSEER');
                 sendNudge(ptyProcess, `Ты закончил все задачи спринта ${sprintNum}? Если да, выведи маркер на отдельной строке:\n\nRALPH_SPRINT_DONE`);
                 sprintResult = await waitForModel(extractSprintDone, 300);
