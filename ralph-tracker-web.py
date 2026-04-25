@@ -1773,7 +1773,15 @@ def get_dashboard_html():
         const ansiRegex = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
         let noAnsiText = (rawText||'').replace(ansiRegex, '');
         let noAnsiExplicit = (explicitStatus||'').replace(ansiRegex, '');
-        
+
+        // 1a. Чистим TUI-мусор Claude Code от status_bar: Box Drawing (U+2500-U+259F),
+        // маркеры курсора (❯⏵◉) и блочные символы шапки (▘▝▛▜▌█). Эти символы попадают
+        // в thinking_status.txt вместе со statusbar'ом и обрезают отображение в UI.
+        noAnsiExplicit = noAnsiExplicit
+            .replace(/[─-▟❯⏵◉▘▝▛▜▌█]+/g, ' ')
+            .replace(/\s{2,}/g, ' ')
+            .trim();
+
         let statusLine = noAnsiExplicit || '';
         let normalizedText = noAnsiText.replace(/\r(?!\n)/g, '\n');
         

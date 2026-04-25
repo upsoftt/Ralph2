@@ -578,8 +578,10 @@ const PATTERN_TABLE = [
         action: 'sleep_short_then_retry',
     },
     {
+        // Только реальные сообщения об ошибке — НЕ матчит "rate limit" в нейтральном
+        // тексте промпта/документации. Иначе ловит ложные срабатывания на boot'е.
         name: 'rate_limit_generic',
-        re: /(rate limit|usage limit reached|too many requests)/i,
+        re: /\b(rate.limit\s+(exceeded|reached|hit)|usage limit reached|too many requests|api rate.limit|429\s+too many)\b/i,
         action: 'backoff',
     },
     {
@@ -1681,6 +1683,16 @@ try {
                         chatLog(`⏰ Sleep завершился: ${reason}`, 'OVERSEER');
                         clearRetryState();
                         if (reason === 'stop') { stopRequested = true; return null; }
+                        // КРИТИЧНО: пока overseer спал, Claude Code мог продолжить работу и
+                        // выдать маркер (например RALPH_SPRINT_DONE). Прежде чем возвращать
+                        // PATTERN_RECOVERY (= caller сделает restart и потеряет работу),
+                        // проверяем буфер на результат. Если уже есть — отдаём его.
+                        const resAfterSleep = conditionFn(jsonlBuffer);
+                        if (resAfterSleep) {
+                            chatLog(`✅ Результат уже в буфере после sleep — пропускаем restart`, 'OVERSEER');
+                            resetJsonlBuffer();
+                            return resAfterSleep;
+                        }
                         // После сна возвращаем 'PATTERN_RECOVERY' — caller'у понятно что нужен resume
                         return 'PATTERN_RECOVERY';
                     } else if (act.kind === 'inject_command') {
@@ -2294,13 +2306,13 @@ RALPH_SPRINT_DONE`;
                     while (!stopRequested && !fs.existsSync(stopFile)) await delay(10000);
                     break;
                 }
-                // Exponential backoff если подряд несколько fail'ов
-                const backoffSec = Math.min(3600, 60 * Math.pow(2, consecutivePtyFails - 1));
-                if (consecutivePtyFails > 1) {
-                    chatLog(`⏳ PTY fail #${consecutivePtyFails} — sleep ${backoffSec}s перед restart`, 'OVERSEER');
-                    const reason = await sleepInterruptible(Date.now() + backoffSec * 1000, `PTY backoff (fail #${consecutivePtyFails})`);
-                    if (reason === 'stop') { stopRequested = true; break; }
-                }
+                // Exponential backoff С ПЕРВОГО fail'а — иначе DLL crash при boot'е
+                // создаёт мгновенный restart loop, который сжигает API-лимит за минуты.
+                // 30s/60s/120s/240s/.../3600s (cap 1ч).
+                const backoffSec = Math.min(3600, 30 * Math.pow(2, consecutivePtyFails - 1));
+                chatLog(`⏳ PTY fail #${consecutivePtyFails} — sleep ${backoffSec}s перед restart`, 'OVERSEER');
+                const reason = await sleepInterruptible(Date.now() + backoffSec * 1000, `PTY backoff (fail #${consecutivePtyFails})`);
+                if (reason === 'stop') { stopRequested = true; break; }
                 const restarted = await restartAgent(`PTY died, auto-restart #${consecutivePtyFails}`, sessionId || null);
                 if (!restarted) { chatLog(`⚠️ Auto-restart не удался — попробую снова в следующем цикле.`, 'OVERSEER'); continue; }
                 continue;
