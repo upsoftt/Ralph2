@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const pty = require('node-pty');
+const { regenerateIndex } = require('./index-generator');
 
 // ─── ARGS ───
 const projectDir = process.argv[2];
@@ -169,6 +170,7 @@ async function main() {
         let briefLine = parsed.brief || parsed.summary?.split(/\.\s/)[0] || `Task ${taskId}`;
         if (briefLine.length > 150) briefLine = briefLine.slice(0, 147) + '...';
         fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${taskId}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${parsed.summary}\n\n</details>\n\n---\n\n`, 'utf8');
+        try { regenerateIndex(projectDir); } catch (e) { log(`⚠️ regenerateIndex failed: ${e.message}`); }
     }
 
     function askNextTask() {

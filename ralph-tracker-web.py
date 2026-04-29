@@ -533,10 +533,13 @@ def update_status():
                                 tasks = []
                                 in_tasks = False
                                 for ln in c.split('\n'):
-                                    if '## Tasks' in ln: 
+                                    if '## Tasks' in ln:
                                         in_tasks = True
                                         continue
-                                    if in_tasks and ln.strip().startswith('##'): 
+                                    # ВАЖНО: только level-2 (## ) завершает секцию, не level-3+ (### / ####).
+                                    # Иначе подзаголовки типа `### RALPH-AUDIT доработки` обрывают парсинг
+                                    # и часть задач не считается. См. инцидент 2026-04-27 (031: 24 задач → видно 7).
+                                    if in_tasks and ln.strip().startswith('## ') and not ln.strip().startswith('### '):
                                         in_tasks = False
                                     if in_tasks:
                                         stripped = ln.strip()
@@ -545,7 +548,11 @@ def update_status():
                                         elif tasks and stripped:
                                             clean_line = re.sub(r'^ПОДРОБНОСТИ:\s*', '', stripped)
                                             if clean_line:
-                                                if tasks[-1]["description"]: tasks[-1]["description"] += " "
+                                                # Сохраняем переносы строк (раньше \n заменялся на пробел и
+                                                # многострочный architect-style ПОДРОБНОСТИ блок схлопывался
+                                                # в одну строку → правая панель в dashboard'е показывала сплошной текст).
+                                                # См. инцидент 2026-04-27.
+                                                if tasks[-1]["description"]: tasks[-1]["description"] += "\n"
                                                 tasks[-1]["description"] += clean_line
                                 spec_details[dirname] = {"tasks": tasks, "completed": sum(1 for t in tasks if t["done"]), "total": len(tasks)}
                             except Exception as e: print(f"[error] parse_spec_details: {e}")
@@ -783,7 +790,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"success": True})
         elif p.path == "/api/start4":
             pid = body.get('project_id')
-            model = body.get('model', 'sonnet')
+            model = body.get('model', 'opus')
             project = next((p for p in PROJECTS if p['id'] == pid), None) or get_active_project()
             if not project:
                 self.send_json({"success": False, "error": "Project not found"})
@@ -2037,6 +2044,12 @@ def get_dashboard_html():
     function getSafeId(s) { return s.replace(/[^a-z0-9]/gi, '_'); }
     function esc(s) { if(!s) return ''; const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
     function escAttr(s) { if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\\/g,'&#92;'); }
+    // escJs — для строк, которые попадают в JS string literal внутри onclick="...".
+    // escAttr делает HTML-encode (&#39;), но браузер декодирует это в raw ' ДО выполнения JS,
+    // и raw апостроф закрывает '...' string в обработчике → SyntaxError, onclick не работает.
+    // Пример: задача «Исправить ссылки в brief'ах» содержит ' — onclick ломается без escJs.
+    // См. инцидент 2026-04-27.
+    function escJs(s) { if(!s) return ''; return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/</g,'\\u003c').replace(/>/g,'\\u003e'); }
     function cleanTaskText(txt) { return txt.replace(/\{\{TASK:[\d.]+\}\}/g, '').trim(); }
     function getTaskNumber(txt) { const m = txt.match(/\{\{TASK:([\d.]+)\}\}/); return m ? m[1] : ''; }
 
@@ -2194,22 +2207,22 @@ def get_dashboard_html():
             <div class="master-header" onclick="toggleSpec('${safeS}')"><div style="display:flex; align-items:center; gap:10px"><span class="master-status-icon">${det.completed === det.total && det.total > 0 ? ICONS.check : ''}</span><span>${esc(s)}</span></div><div class="spec-right"><div class="spec-progress-bar"><div class="spec-progress-fill" style="width:${det.total ? (det.completed/det.total*100) : 0}%"></div></div><span class="spec-counter">${det.completed}/${det.total}</span></div></div>
             <div id="body-${safeS}" style="display:${_openSpecs.has(safeS) ? 'block' : 'none'}">
                 ${det.tasks.map((t, i) => `<div class="subtask ${t.done?'done':''}" id="st-${safeS}-${i}" data-task-id="${i}">
-                    <div class="subtask-header" onclick="toggleSubtask('${safeS}', ${i}, '${escAttr(s)}', '${escAttr(t.text)}')">
+                    <div class="subtask-header" onclick="toggleSubtask('${safeS}', ${i}, '${escJs(s)}', '${escJs(t.text)}')">
                         <span class="task-status-icon">${t.done ? ICONS.check : ICONS.square}</span>
                         <span style="font-weight:bold; color:var(--blue); min-width:30px;">${getTaskNumber(t.text)}</span><span>${esc(cleanTaskText(t.text))}</span>
                     </div>
                     <div class="desc-box" id="desc-${safeS}-${i}">
                         <textarea onfocus="isEditing=true" onblur="isEditing=false" oninput="document.getElementById('save-${safeS}-${i}').style.display='block'">${esc(t.description||'')}</textarea>
-                        <button class="save-btn" id="save-${safeS}-${i}" style="display:none" onclick="saveDesc('${escAttr(s)}','${escAttr(t.text)}', '${safeS}', ${i})">Сохранить изменения</button>
+                        <button class="save-btn" id="save-${safeS}-${i}" style="display:none" onclick="saveDesc('${escJs(s)}','${escJs(t.text)}', '${safeS}', ${i})">Сохранить изменения</button>
                         <div class="res-container" id="res-${safeS}-${i}"></div>
                     </div>
                 </div>`).join('')}
-                <button class="add-subtask-btn" id="add-btn-${safeS}" onclick="showAddSubtask('${safeS}', '${escAttr(s)}')">+ Добавить подзадачу</button>
+                <button class="add-subtask-btn" id="add-btn-${safeS}" onclick="showAddSubtask('${safeS}', '${escJs(s)}')">+ Добавить подзадачу</button>
                 <div class="add-subtask-form" id="add-form-${safeS}" style="display:none">
                     <input type="text" id="add-title-${safeS}" placeholder="Название подзадачи..." />
                     <textarea id="add-desc-${safeS}" placeholder="Описание (необязательно)..." onfocus="isEditing=true" onblur="isEditing=false"></textarea>
                     <div style="display:flex; gap:8px">
-                        <button class="save-btn" style="display:block" onclick="submitSubtask('${safeS}', '${escAttr(s)}')">Сохранить</button>
+                        <button class="save-btn" style="display:block" onclick="submitSubtask('${safeS}', '${escJs(s)}')">Сохранить</button>
                         <button class="save-btn" style="display:block; background:var(--bg); color:var(--text-dim); border-color:var(--border)" onclick="hideAddSubtask('${safeS}')">Отмена</button>
                     </div>
                 </div>
