@@ -1642,11 +1642,14 @@ try {
                 // См. инцидент 2026-04-27.
                 return;
             }
-            // Fast death (<15s после spawn) при resume = session corrupted, JSONL state damaged.
+            // Fast death (<30s после spawn) при resume = session corrupted, JSONL state damaged.
             // Считаем подряд такие смерти — на 2-й auto-reset session_id (clearSprintSession +
             // null sessionId → fresh restart без resume). См. инцидент 2026-04-27: resume на
             // одну и ту же d5203837 → DLL crash через 2 сек → loop с растущим backoff.
-            if (ageMs < 15000) {
+            // Порог поднят с 15s до 30s 2026-05-02 — реальный boot+nudge+ConPTY crash на больших
+            // сессиях занимает 15-20s, граница 15s давала граничные кейсы где счётчик сбрасывался
+            // и auto-reset никогда не наступал (см. инцидент Domovoy sprint 38, fail #18+).
+            if (ageMs < 30000) {
                 consecutiveFastResumeDeaths++;
                 chatLog(`⚠️ Быстрая смерть PTY через ${Math.round(ageMs/1000)}s (подряд: ${consecutiveFastResumeDeaths})`, 'OVERSEER');
             } else {
@@ -2087,8 +2090,36 @@ try {
         const source = stripPromptFrames(jsonlBuffer || text);
         // Строгая проверка: маркер на отдельной строке
         if (/^RALPH_AUDIT_OK\s*$/m.test(source)) return 'OK';
+        // FIX_HEAVY проверяем ПЕРЕД FIX (FIX_HEAVY содержит подстроку FIX)
+        if (/^RALPH_AUDIT_FIX_HEAVY\s*$/m.test(source)) return 'FIX_HEAVY';
         if (/^RALPH_AUDIT_FIX\s*$/m.test(source)) return 'FIX';
         return null;
+    }
+
+    /**
+     * Возвращает cache_read_input_tokens последнего assistant-сообщения из JSONL.
+     * Используется для оценки текущего размера контекста и решения о force restart
+     * при переходе в фазу fix (защита от роста к 1M-cap и ConPTY DLL crash).
+     * Возвращает 0 если JSONL не доступен или нет assistant-записей.
+     */
+    function getLatestCacheReadTokens() {
+        try {
+            if (!jsonlPath || !fs.existsSync(jsonlPath)) return 0;
+            const content = fs.readFileSync(jsonlPath, 'utf8');
+            const lines = content.split('\n');
+            // Идём с конца — последний assistant с usage.cache_read_input_tokens
+            for (let i = lines.length - 1; i >= 0; i--) {
+                const line = lines[i].trim();
+                if (!line) continue;
+                try {
+                    const obj = JSON.parse(line);
+                    if (obj.type === 'assistant' && obj.message?.usage?.cache_read_input_tokens) {
+                        return obj.message.usage.cache_read_input_tokens;
+                    }
+                } catch {}
+            }
+            return 0;
+        } catch (e) { return 0; }
     }
 
     /**
@@ -2131,15 +2162,20 @@ try {
 После добавления задач — вызови /ralph-spec-creator для генерации спецификаций.
 
 АБСОЛЮТНОЕ ТРЕБОВАНИЕ — БЕЗ ЭТОГО АУДИТ СЧИТАЕТСЯ ПРОВАЛЕННЫМ:
-После ПОЛНОГО завершения аудита ты ОБЯЗАН вывести РОВНО ОДНО из двух слов-маркеров:
+После ПОЛНОГО завершения аудита ты ОБЯЗАН вывести РОВНО ОДНО из ТРЁХ слов-маркеров:
 
-RALPH_AUDIT_OK
+RALPH_AUDIT_OK         — всё в порядке, доработки не нужны
 
-или
+RALPH_AUDIT_FIX        — найдены ЛЁГКИЕ доработки, продолжаем в этой же сессии
 
-RALPH_AUDIT_FIX
+RALPH_AUDIT_FIX_HEAVY  — найдены КРУПНЫЕ доработки, нужен fresh restart сессии
 
-Это слово должно быть на ОТДЕЛЬНОЙ строке, без дополнительного текста.
+Критерии выбора FIX vs FIX_HEAVY:
+- ≤3 простых задач (опечатки, добавить тест, мелкие правки, переименование) → FIX
+- ≥4 задач, ИЛИ хотя бы одна архитектурная (рефакторинг модуля, миграция БД, новый сервис), ИЛИ суммарно ≥500 строк изменений → FIX_HEAVY
+- Если сомневаешься — выбирай FIX_HEAVY (overhead restart дешевле чем DLL crash при большом контексте)
+
+Маркер должен быть на ОТДЕЛЬНОЙ строке, без дополнительного текста.
 Без этого маркера overseer не сможет определить результат аудита и засчитает таймаут.
 Выведи маркер ПОСЛЕДНИМ сообщением, после всех отчётов и логов.`;
 
@@ -2479,7 +2515,7 @@ RALPH_SPRINT_DONE`;
             }
             if (sprintResult === 'PTY_DEAD') {
                 consecutivePtyFails++;
-                // Auto session reset: если 2+ быстрых смертей подряд (<15s) И есть sessionId
+                // Auto session reset: если 2+ быстрых смертей подряд (<30s) И есть sessionId
                 // — JSONL state damaged, resume на эту session всегда крашится. Сбрасываем
                 // привязку спринта и стартуем fresh без resume. См. инцидент 2026-04-27.
                 if (consecutiveFastResumeDeaths >= 2 && sessionId) {
@@ -2493,6 +2529,24 @@ RALPH_SPRINT_DONE`;
                     consecutivePtyFails = 0; // fresh start — счётчики начинают с нуля
                     const restarted = await restartAgent(`auto session reset (resume corrupted)`, null);
                     if (!restarted) { chatLog(`⚠️ Auto-reset restart не удался — попробую снова в следующем цикле.`, 'OVERSEER'); continue; }
+                    continue;
+                }
+                // Страховка: если consecutiveFastResumeDeaths не сработал (PTY умирал на границе
+                // порога), но накопилось 5+ PTY fail'ов подряд — force fresh независимо от ageMs.
+                // См. инцидент 2026-05-01 Domovoy sprint 38 fail #18: PTY умирал на 15-16s,
+                // ageMs=15000 не попадал в `< 15000` (было), счётчик сбрасывался → auto-reset
+                // не наступал → 18 fail'ов в loop'е без вмешательства.
+                if (consecutivePtyFails >= 5 && sessionId) {
+                    chatLog(`🔄 ${consecutivePtyFails} PTY fail'ов подряд при resume — force fresh start независимо от ageMs.`, 'OVERSEER');
+                    try {
+                        clearSprintSession(sprintNum);
+                        chatLog(`🗑️ Очищен sessionId спринта ${sprintNum} в sprint_sessions.json`, 'OVERSEER');
+                    } catch (e) { console.error('[error] force_fresh_clear_session:', e.message); }
+                    sessionId = null;
+                    consecutiveFastResumeDeaths = 0;
+                    consecutivePtyFails = 0;
+                    const restarted = await restartAgent(`force fresh after 5 consecutive PTY fails`, null);
+                    if (!restarted) { chatLog(`⚠️ Force-fresh restart не удался — попробую снова в следующем цикле.`, 'OVERSEER'); continue; }
                     continue;
                 }
                 // Retry budget: если за последние 24 часа не было ни одного RALPH_READY → dormant
@@ -2587,7 +2641,7 @@ RALPH_SPRINT_DONE`;
                 chatLog(`📋 Аудит спринта ${sprintNum} (попытка ${attempts + 1}/${MAX_AUDIT_ATTEMPTS})...`, 'OVERSEER');
                 updateStatus({ phase: 'auditing' });
                 const auditResult = await auditSprint(sprintNum, attempts + 1);
-                if (auditResult === 'FIX') {
+                if (auditResult === 'FIX' || auditResult === 'FIX_HEAVY') {
                     // Аудитор добавил задачи в tasks.md — но spec.md файлы остались старые,
                     // task_state.json тоже stale. Регенерируем spec для текущего спринта и
                     // обновляем task_state, чтобы следующая итерация увидела новые задачи.
@@ -2628,6 +2682,31 @@ RALPH_SPRINT_DONE`;
                         chatLog(`🔄 Аудитор добавил ${postAuditSprint.undoneTasks.length} доработок в спринт ${sprintNum}. Продолжаю выполнение...`, 'OVERSEER');
                     } else {
                         chatLog(`⚠️ Аудитор сказал FIX, но невыполненных задач в спринте ${sprintNum} не найдено (возможно spec не создан). Продолжаю...`, 'OVERSEER');
+                    }
+
+                    // ─── Force fresh restart перед fix-цикл ───
+                    // Триггеры для restart перед началом fix-задач:
+                    //   1. Аудитор сказал FIX_HEAVY (≥4 задач или архитектурная переписка) — agent оценил
+                    //   2. cache_read_input_tokens последнего ответа > 400K — страховка от ConPTY DLL crash
+                    //      и от приближения к 1M context cap
+                    // На FIX (без HEAVY) и cache <= 400K — продолжаем в той же сессии (экономим overhead).
+                    const cacheReadTokens = getLatestCacheReadTokens();
+                    const CONTEXT_RESTART_THRESHOLD = 400000;
+                    const needsRestart = (auditResult === 'FIX_HEAVY') || (cacheReadTokens > CONTEXT_RESTART_THRESHOLD);
+                    if (needsRestart) {
+                        const reason = auditResult === 'FIX_HEAVY'
+                            ? `аудитор пометил доработки как HEAVY`
+                            : `контекст ${Math.round(cacheReadTokens / 1000)}K > ${CONTEXT_RESTART_THRESHOLD / 1000}K cap`;
+                        chatLog(`🔄 Fresh restart перед fix-циклом: ${reason}`, 'OVERSEER');
+                        try {
+                            clearSprintSession(sprintNum);
+                            chatLog(`🗑️ Очищен sessionId спринта ${sprintNum} → fresh start`, 'OVERSEER');
+                        } catch (e) { console.error('[error] clear_session_for_fix_restart:', e.message); }
+                        sessionId = null;
+                        consecutiveFastResumeDeaths = 0;
+                        consecutivePtyFails = 0;
+                        const restarted = await restartAgent(`fresh restart перед fix-циклом (${reason})`, null);
+                        if (!restarted) { chatLog(`⚠️ Fresh restart не удался — попробую снова в следующем цикле.`, 'OVERSEER'); continue; }
                     }
                     continue; // Вернёмся — findNextSprint найдёт новые невыполненные задачи (или следующий спринт)
                 }
