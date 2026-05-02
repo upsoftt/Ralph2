@@ -1480,6 +1480,32 @@ try {
      */
     function spawnAgent(resumeSessionId = null) {
         // Resume existing session or create new
+        // ─── PRE-RESUME GUARDS ───
+        // Resume крупной/старой сессии = риск ConPTY DLL crash на Windows.
+        // Перед resume проверяем 2 защиты:
+        //   1. Размер JSONL > 3MB → contextual cap близок, на boot высокая вероятность DLL crash
+        //   2. mtime JSONL > 24 часа → сессия "холодная", может быть corrupted
+        // В обоих случаях принудительно делаем fresh start без resume + clearSprintSession.
+        // См. инциденты 2026-04-29 (sprint 36, 6.4MB JSONL → loop) и 2026-05-02 (sprint 39 → fast death).
+        const RESUME_MAX_JSONL_BYTES = 3 * 1024 * 1024; // 3 MB
+        const RESUME_MAX_AGE_HOURS = 24;
+        if (resumeSessionId) {
+            const candidatePath = path.join(claudeProjectsDir, projectSlug(workspaceDirResolved), `${resumeSessionId}.jsonl`);
+            try {
+                if (fs.existsSync(candidatePath)) {
+                    const st = fs.statSync(candidatePath);
+                    const ageHours = (Date.now() - st.mtimeMs) / 3600000;
+                    if (st.size > RESUME_MAX_JSONL_BYTES) {
+                        chatLog(`⚠️ Resume blocked: JSONL ${(st.size / 1024 / 1024).toFixed(1)}MB > ${RESUME_MAX_JSONL_BYTES / 1024 / 1024}MB → force fresh (избегаем ConPTY DLL crash)`, 'OVERSEER');
+                        resumeSessionId = null;
+                    } else if (ageHours > RESUME_MAX_AGE_HOURS) {
+                        chatLog(`⚠️ Resume blocked: JSONL возраст ${ageHours.toFixed(1)}ч > ${RESUME_MAX_AGE_HOURS}ч → force fresh (stale session)`, 'OVERSEER');
+                        resumeSessionId = null;
+                    }
+                }
+            } catch (e) { console.error('[error] pre_resume_guards:', e.message); }
+        }
+
         if (resumeSessionId) {
             sessionId = resumeSessionId;
             chatLog(`🔄 Resume session: ${sessionId}`, 'OVERSEER');
@@ -2655,55 +2681,71 @@ RALPH_SPRINT_DONE`;
                 updateStatus({ phase: 'auditing' });
                 const auditResult = await auditSprint(sprintNum, attempts + 1);
                 if (auditResult === 'FIX' || auditResult === 'FIX_HEAVY') {
-                    // ─── COLLECT-BEFORE-FIX: страховка от потери прогресса ───
-                    // Если в спринте есть задачи, помеченные done (выполненные ДО аудита, например
-                    // 39.1-39.4 в спринте 39), но не имеющие RALPH_RESULT файла в results/ —
-                    // соберём их сейчас. Это нужно потому что:
-                    //   1. На FIX_HEAVY ниже мы делаем fresh restart, новая сессия может крашиться.
-                    //      Без сохранённых отчётов придётся переспрашивать done-задачи в новой
-                    //      сессии (Claude должен будет дать отчёты по коду из git).
-                    //   2. На FIX в той же сессии — если она потом крашнется, то же самое.
-                    // Собираем ТОЛЬКО done-задачи (по task_state) — undone не трогаем, их выполнит
-                    // следующий цикл sprintLoop ПОСЛЕ regenerate spec (там появятся новые fix-задачи).
+                    // ─── COLLECT-FROM-CURRENT-SESSION: опрос текущей сессии перед restart ───
+                    // ВАЖНО: отчёты по выполненной работе должны браться у ТОЙ сессии Claude,
+                    // которая её делала. После fresh restart на FIX_HEAVY новая сессия не помнит
+                    // деталей реализации, ей придётся reverse-engineer через git diff/log.
+                    // Опрашиваем ТЕКУЩУЮ сессию ПЕРЕД restart по всем задачам, которые в spec
+                    // ещё не имеют RALPH_RESULT файла.
+                    //
+                    // Это работает для обоих случаев: FIX и FIX_HEAVY. Для FIX страховка от
+                    // последующего краха в той же сессии. Для FIX_HEAVY — критично, иначе
+                    // отчёты будут от другого "автора".
                     try {
-                        const doneTasksWithoutReport = getSprintTasks(sprintNum).filter(t => {
-                            if (!t.done) return false; // undone — не для нас
+                        const tasksWithoutReport = getSprintTasks(sprintNum).filter(t => {
                             const safeId = t.id.replace(/\./g, '_');
                             return !fs.existsSync(path.join(resultsDir, `${safeId}.json`));
                         });
-                        if (doneTasksWithoutReport.length > 0) {
-                            chatLog(`💾 Pre-fix collect: ${doneTasksWithoutReport.length} выполненных задач без RALPH_RESULT (сохраняю до restart)...`, 'OVERSEER');
-                            for (const t of doneTasksWithoutReport) {
-                                if (stopRequested) break;
-                                resetJsonlBuffer();
-                                sendCommand(ptyProcess, `Ты выполнил задачу ${t.id} в рамках спринта ${sprintNum}. Напиши краткий отчёт:\n\nRALPH_RESULT\nTASK: ${t.id}\nBRIEF: что сделано\nSUMMARY: техническое описание\nSTATUS: DONE\nRALPH_END`);
-                                const r = await waitForModel(extractResult, 120);
-                                if (r && r.status === 'DONE') {
-                                    const safeId = t.id.replace(/\./g, '_');
+                        if (tasksWithoutReport.length > 0) {
+                            chatLog(`💾 Pre-fix collect: опрашиваю текущую сессию по ${tasksWithoutReport.length} задач без RALPH_RESULT...`, 'OVERSEER');
+                            // Batch-промпт: список задач которые НУЖНО отчитать. Claude САМ решает
+                            // про какие выводить RALPH_RESULT (которые он сделал), про какие пропустить
+                            // (не сделал в этой сессии). Это защищает от "Claude делает задачу под
+                            // видом отчёта" — он отчитывается только за уже сделанное.
+                            const taskList = tasksWithoutReport.map(t => `  - ${t.id}`).join('\n');
+                            resetJsonlBuffer();
+                            sendCommand(ptyProcess, `Аудитор нашёл доработки. Перед перезапуском сессии — отчитайся ТОЛЬКО за те задачи спринта ${sprintNum}, которые ты УЖЕ выполнил в этой сессии (или закоммитил ранее и точно знаешь что они сделаны). Для каждой такой задачи выведи блок:\n\nRALPH_RESULT\nTASK: <id>\nBRIEF: что сделано\nSUMMARY: техническое описание\nSTATUS: DONE\nRALPH_END\n\nЕсли задача НЕ сделана — НЕ выводи блок для неё (пропусти молча). Список задач которые без отчёта:\n\n${taskList}\n\nВыведи отчёты подряд без markdown-обёрток.`);
+                            const extractBatch = () => {
+                                const results = extractAllResults(jsonlBuffer);
+                                // Считаем "достаточно": когда нет новых блоков 30s или их >= ожидаемое
+                                if (results.length >= tasksWithoutReport.length) return results;
+                                return null;
+                            };
+                            let batchResults = await waitForModel(extractBatch, 240);
+                            if (batchResults === 'FORMAT_ERROR' || batchResults === null) {
+                                batchResults = extractAllResults(jsonlBuffer);
+                            }
+                            if (Array.isArray(batchResults) && batchResults.length > 0) {
+                                if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
+                                let collected = 0;
+                                for (const r of batchResults) {
+                                    if (r.status !== 'DONE') continue;
+                                    const taskId = r.task_id;
+                                    const safeId = taskId.replace(/\./g, '_');
                                     fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
                                         status: 'READY',
-                                        task_id: r.task_id || t.id,
+                                        task_id: taskId,
                                         brief: r.brief || '',
                                         summary: r.summary || 'Задача выполнена.'
                                     }, null, 2), 'utf8');
-                                    if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
-                                    let briefLine = r.brief || `Task ${t.id}`;
+                                    try { markTaskCollected(taskId, sessionId); } catch (e) { console.error('[error] mark_collected_pre_fix:', e.message); }
+                                    let briefLine = r.brief || `Task ${taskId}`;
                                     if (briefLine.length > 150) briefLine = briefLine.slice(0, 147) + '...';
-                                    fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${t.id}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${r.summary}\n\n</details>\n\n---\n\n`, 'utf8');
-                                    chatLog(`✅ pre-fix ${t.id}: ${(r.brief || '').slice(0, 80)}`, 'OVERSEER');
-                                } else {
-                                    chatLog(`⚠️ pre-fix ${t.id}: не удалось получить отчёт (продолжаю — overseer запросит снова после fix-цикла)`, 'OVERSEER');
+                                    fs.appendFileSync(historyFile, `### [${new Date().toLocaleString()}] Задача ${taskId}\n${briefLine}\n\n<details><summary>Подробности</summary>\n\n${r.summary}\n\n</details>\n\n---\n\n`, 'utf8');
+                                    chatLog(`✅ pre-fix ${taskId}: ${(r.brief || '').slice(0, 80)}`, 'OVERSEER');
+                                    collected++;
                                 }
-                            }
-                            // Промежуточный commit — на случай если новая сессия крашнется.
-                            // git add -A захватит и работу по done-задачам, и обновлённые results/.
-                            try {
-                                require('child_process').execSync('git add -A', { cwd: projectDir, timeout: 60000 });
-                                require('child_process').execSync(`git commit -m "wip(sprint-${sprintNum}): partial progress before audit-fix" --no-verify`, { cwd: projectDir, timeout: 60000 });
-                                chatLog(`💾 Промежуточный wip-коммит спринта ${sprintNum}`, 'OVERSEER');
-                            } catch (commitErr) {
-                                // ничего не закоммитилось (возможно, нечего коммитить) — ок, продолжаем
-                                chatLog(`ℹ️ Промежуточный коммит пропущен: ${commitErr.message?.slice(0, 80)}`, 'OVERSEER');
+                                chatLog(`💾 Pre-fix собрано ${collected} отчётов из ${tasksWithoutReport.length}`, 'OVERSEER');
+                                // Промежуточный wip-commit — страховка от потери при крахе fresh-сессии
+                                try {
+                                    require('child_process').execSync('git add -A', { cwd: projectDir, timeout: 60000 });
+                                    require('child_process').execSync(`git commit -m "wip(sprint-${sprintNum}): partial progress before audit-fix" --no-verify`, { cwd: projectDir, timeout: 60000 });
+                                    chatLog(`💾 Промежуточный wip-коммит спринта ${sprintNum}`, 'OVERSEER');
+                                } catch (commitErr) {
+                                    chatLog(`ℹ️ Промежуточный коммит пропущен (возможно нечего): ${commitErr.message?.slice(0, 80)}`, 'OVERSEER');
+                                }
+                            } else {
+                                chatLog(`⚠️ Pre-fix: текущая сессия не вернула отчётов — продолжаем, новая сессия попробует позже`, 'OVERSEER');
                             }
                         }
                     } catch (e) {
