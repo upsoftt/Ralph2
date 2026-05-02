@@ -2717,10 +2717,17 @@ RALPH_SPRINT_DONE`;
                             }
                             if (Array.isArray(batchResults) && batchResults.length > 0) {
                                 if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
+                                // Whitelist — Claude может ответить task_id из чужой задачи.
+                                // См. инцидент 2026-05-02 sprint 39: file 39_7.json содержал task_id 39.6.
+                                const preFix_requestedIds = new Set(tasksWithoutReport.map(t => t.id));
                                 let collected = 0;
                                 for (const r of batchResults) {
                                     if (r.status !== 'DONE') continue;
                                     const taskId = r.task_id;
+                                    if (!preFix_requestedIds.has(taskId)) {
+                                        chatLog(`⚠️ Pre-fix: игнорирую RALPH_RESULT с task_id=${taskId} — не в запросе`, 'OVERSEER');
+                                        continue;
+                                    }
                                     const safeId = taskId.replace(/\./g, '_');
                                     fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
                                         status: 'READY',
@@ -2879,9 +2886,19 @@ RALPH_SPRINT_DONE`;
                 if (batchResults && Array.isArray(batchResults)) {
                     // Сохраняем каждый результат
                     if (!fs.existsSync(historyFile)) fs.writeFileSync(historyFile, "# История проекта\n\n", 'utf8');
+                    // Whitelist task_id'ов которые мы запрашивали — защита от
+                    // RALPH_RESULT с task_id из чужого спринта/задачи.
+                    // См. инцидент 2026-05-02 (Sprint 39 loop): Claude в fallback-сессии
+                    // ответил task_id=39.6 на запрос за 39.7 → файл 39_7.json сохранил
+                    // под task_id 39.6 → markCollected(39.6) → 39.7 осталась [ ] → loop.
+                    const requestedTaskIds = new Set(tasksNeedingReport.map(t => t.id));
                     for (const r of batchResults) {
                         if (r.status !== 'DONE') continue;
                         const taskId = r.task_id;
+                        if (!requestedTaskIds.has(taskId)) {
+                            chatLog(`⚠️ Игнорирую RALPH_RESULT с task_id=${taskId} — не входит в запрос (${tasksNeedingReport.map(t => t.id).slice(0, 5).join(', ')}...). Возможно Claude перепутал задачу.`, 'OVERSEER');
+                            continue;
+                        }
                         const safeId = taskId.replace(/\./g, '_');
                         fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
                             status: 'READY',
@@ -2909,6 +2926,13 @@ RALPH_SPRINT_DONE`;
                         chatLog(`📝 [${t.id}] Дособираю отчёт (не вошёл в batch)...`, 'OVERSEER');
                         sendCommand(ptyProcess, `Ты выполнил задачу ${t.id} в рамках спринта ${sprintNum}. Напиши краткий отчёт:\n\nRALPH_RESULT\nTASK: ${t.id}\nBRIEF: что сделано\nSUMMARY: техническое описание\nSTATUS: DONE\nRALPH_END`);
                         const fallbackResult = await waitForModel(extractResult, 120);
+                        // КРИТИЧНО: проверяем что Claude отчитался именно за t.id
+                        // (а не за другую задачу, которую он "вспомнил"). Без этой проверки
+                        // получался файл results/<t.id>.json с содержимым task_id != t.id.
+                        if (fallbackResult && fallbackResult.status === 'DONE' && fallbackResult.task_id !== t.id) {
+                            chatLog(`⚠️ Fallback ${t.id}: Claude отчитался task_id=${fallbackResult.task_id} вместо ${t.id} — игнорирую, оставляю задачу [ ]`, 'OVERSEER');
+                            continue;
+                        }
                         if (fallbackResult && fallbackResult.status === 'DONE') {
                             const safeId = t.id.replace(/\./g, '_');
                             fs.writeFileSync(path.join(resultsDir, `${safeId}.json`), JSON.stringify({
@@ -2954,8 +2978,18 @@ RALPH_SPRINT_DONE`;
             try {
                 const { execSync } = require('child_process');
                 execSync('git add -A', { cwd: projectDir, timeout: 60000 });
-                execSync(`git commit -m "Sprint ${sprintNum}: ${sprintTitle}" --no-verify`, { cwd: projectDir, timeout: 60000 });
-                chatLog(`💾 Коммит спринта ${sprintNum} создан.`, 'OVERSEER');
+                // Проверяем есть ли что коммитить — иначе git commit вернёт error
+                // "nothing to commit, working tree clean" и старая логика трактовала это
+                // как сбой → restart Claude → loop. См. инцидент 2026-05-02 sprint 39:
+                // 12 рестартов на одной задаче 39.7 потому что Claude в новой сессии
+                // ничего не менял, commit падал, restart, повтор.
+                const stagedDiff = execSync('git diff --cached --stat', { cwd: projectDir, timeout: 30000, encoding: 'utf8' }).trim();
+                if (!stagedDiff) {
+                    chatLog(`ℹ️ Нечего коммитить (working tree clean) — спринт ${sprintNum} уже в репо. Закрываю без commit.`, 'OVERSEER');
+                } else {
+                    execSync(`git commit -m "Sprint ${sprintNum}: ${sprintTitle}" --no-verify`, { cwd: projectDir, timeout: 60000 });
+                    chatLog(`💾 Коммит спринта ${sprintNum} создан.`, 'OVERSEER');
+                }
             } catch (commitErr) {
                 chatLog(`⚠️ Не удалось закоммитить: ${commitErr.message?.slice(0, 100)}`, 'OVERSEER');
             }
