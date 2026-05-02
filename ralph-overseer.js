@@ -2780,30 +2780,19 @@ RALPH_SPRINT_DONE`;
                 }
             }
 
-            // ─── ЗАЩИТА: если есть undone-задачи, НЕ собираем отчёты ───
-            // Если по какой-то причине (баг, сбой парсера, retry) мы здесь оказались
-            // при наличии [ ] задач в спринте — НЕ просим отчёты. Иначе Claude получит
-            // промпт «отчитайся об выполненной задаче N.M», увидит что её нет в коде, и
-            // начнёт ВЫПОЛНЯТЬ её под видом отчёта (с timeout 120s — обычно не успевает).
-            // Возвращаемся в начало mainLoop — findNextSprint найдёт undone и выполнит.
-            // См. инцидент 2026-05-02 sprint 38/39: auditSprint вернул null (FIX_HEAVY баг),
-            // mainLoop пропустил regenerate spec, дошёл до batch с 11 задачами включая
-            // 7 невыполненных fix-задач → Claude вынужден был делать их под видом отчётов.
-            const allTasksForCheck = getSprintTasks(sprintNum);
-            const undoneInSprint = allTasksForCheck.filter(t => !t.done);
-            if (undoneInSprint.length > 0) {
-                chatLog(`⚠️ Спринт ${sprintNum}: есть ${undoneInSprint.length} невыполненных задач (${undoneInSprint.slice(0, 5).map(t => t.id).join(', ')}${undoneInSprint.length > 5 ? '...' : ''}). НЕ собираю отчёты — возвращаюсь к executing.`, 'OVERSEER');
-                // sprintAuditAttempts уже инкрементирован — но если мы тут попали через MAX_AUDIT_ATTEMPTS,
-                // это уже был последний шанс. Не зацикливаемся: continue → следующая итерация увидит
-                // undone и пойдёт в фазу executing с новым sprintPrompt.
-                continue;
-            }
-
             // ─── BATCH-СБОР ОТЧЁТОВ (один промпт на все задачи) ───
+            // Защита от "Claude делает задачу под видом отчёта": срабатывает на нижнем уровне.
+            // - batchResults обрабатываются с `if (r.status !== 'DONE') continue` — Claude может
+            //   ответить STATUS: PENDING для невыполненной, и markCollected не вызовется → задача
+            //   останется [ ] → finalUncollected проверка после batch → continue → следующая
+            //   итерация sprintLoop найдёт её через findNextSprint → executing.
+            // - Раньше тут был блок "если есть [ ] в task_state — return к executing", но он
+            //   создавал бесконечный loop: task_state.done == false для ВСЕХ задач до batch
+            //   (markCollected вызывается только после получения RALPH_RESULT), поэтому условие
+            //   срабатывало даже на корректном AUDIT_OK → loop. См. инцидент 2026-05-02 ночью.
             const allTasks = getSprintTasks(sprintNum);
-            // Фильтруем задачи, для которых уже есть результат — только done-tasks без файла отчёта
+            // Фильтруем задачи, для которых уже есть результат
             const tasksNeedingReport = allTasks.filter(t => {
-                if (!t.done) return false; // защита: только done-задачи
                 const safeId = t.id.replace(/\./g, '_');
                 return !fs.existsSync(path.join(resultsDir, `${safeId}.json`));
             });
